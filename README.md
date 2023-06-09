@@ -6,10 +6,10 @@ To set up:
 
 1. git clone locally
 1. edit the file, change variables
-1.* `target_file`
-1.* `title`
-1.* `target_words`
-1.* `date_start`
+  1. `target_file`
+  1. `title`
+  1. `target_words`
+  1. `date_start`
 
 
 To use:
