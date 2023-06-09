@@ -1,0 +1,225 @@
+require 'date'
+require 'date'
+
+class Numeric
+  # from
+  #   http://pleac.sourceforge.net/pleac_ruby/numbers.html
+  def commify
+    self.to_s =~ /([^\.]*)(\..*)?/
+    int, dec = $1.reverse, $2 ? $2 : ""
+    while int.gsub!(/(,|\.|^)(\d{3})(\d)/, '\1\2,\3')
+    end
+    int.reverse + dec
+  end
+end
+
+
+target_file       = "story.txt"
+title             = "The Aristillus Engineering Club and the Journey to the Center of Mars"
+target_words      = 123000
+date_start        = Date.parse('22 May 2023') # Date.parse('22 July 2022')
+words_per_page    = 250
+
+# chapter_words  - hash of chapter numbers -> words in each chapter
+# chapter_titles - hash of chapter numbers -> titles
+# done           - number of finished chapters
+# notdone        - number of unfinished chapters
+# avg            - avg wordsize of finished chapters
+# std_dev        - std dev of chapter size
+
+def get_chapter_hash()
+  file = File.open("story.txt", "r")
+  contents = file.read
+  arr = contents.split("== chapter")
+  arr = arr.slice(1..9999)
+
+  chapter_words = {}
+  arr.each do |text|
+    text.match(/ (\d+)/)
+    # bug: drop the first line here
+    chap_num = $1.to_i
+    raise "*** error: duplicate chapter #{chap_num}" unless chapter_words[chap_num].nil?
+    word_count = text.split.size
+    chapter_words[chap_num] = word_count
+  end
+
+  chapter_titles = {}
+  arr.each do |text|
+    text.match(/ (\d+)/)
+    # bug: drop the first line here
+    num = $1.to_i
+    title = text.split("\n").first.split(":")[1]
+    chapter_titles[num] = title
+  end
+
+  size_cutoff = 1000
+
+  done = chapter_words.select { |ch,words|  words > size_cutoff}.count
+  notdone = chapter_words.size - done
+  avg = chapter_words.select { |ch,words|  words > size_cutoff}.sum{|ch,words| words} / done
+
+  variance_array = chapter_words.select { |ch,words|  words > size_cutoff}.map{|ch,words| (words - avg) }
+  
+  std_dev = Math.sqrt(variance_array.sum { |v| v ** 2} / variance_array.size)
+
+  
+  return { :chapter_words => chapter_words,
+           :chapter_titles =>chapter_titles,
+           :done          => done,
+           :notdone       => notdone,
+           :avg           => avg,
+           :std_dev       => std_dev  }
+  
+end
+
+# takes an optional git hash in case you've already committed the files and still want to run the command
+#
+# without git hash spec:
+#   rake
+#
+# with git hash spec:
+#   rake default[047b60168aa7ee1ba2d1d9cd515ddf749ccee8f3]
+#
+task :default, [:git_hash] do |t, args|
+
+  ret = get_chapter_hash()
+
+  #  puts "ret = #{ret.inspect}"
+  
+  actual_words     = `cat #{target_file}  | wc -w`.to_i
+  
+  actual_chapters = ret[:done]
+  target_chapters   = ret[:done] + ret[:notdone]
+
+  
+  days_since_start = (Date.today - date_start).to_i + 1
+  
+  to_go_words = target_words - actual_words
+
+  percent_words    =  actual_words * 1.0 / target_words
+  percent_chapters =  actual_chapters * 1.0 / target_chapters
+  
+  write_rate       = (target_words / days_since_start ).to_i || 1
+  to_go_days       = to_go_words / write_rate
+
+  words_minus      = `git diff  #{args[:git_hash]} #{target_file}  | grep "^\-" | wc -w`.to_i
+  words_plus       = `git diff  #{args[:git_hash]} #{target_file}  | grep "^\+" | wc -w`.to_i
+  words_delta      = words_plus - words_minus
+
+  revised_words_before = `git show HEAD:./#{target_file} | grep "<===" -B 100000 | wc -w`.to_i
+  revised_words = `cat #{target_file} | grep "<===" -B 100000 | wc -w`.to_i
+  revised_words_delta = revised_words - revised_words_before
+  revised_fraction = revised_words   * 1.000  / actual_words
+  if revised_words > 0
+    revise_rate      = (revised_words / days_since_start ).to_i || 1
+    to_revise_words  = actual_words - revised_words
+    to_go_days       = to_revise_words / revise_rate
+  end
+  
+  puts ""
+  puts "  +--------------------"
+  puts "  | #{title}"
+  puts "  |"
+  puts "  | story :    #{actual_words.commify} / #{target_words&.commify}  words ( #{sprintf('%0.2f', percent_words * 100)} % )"
+  puts "  |            #{actual_words / words_per_page} / #{target_words / words_per_page}  pages"
+  puts "  |            #{actual_chapters} / #{target_chapters} chapters ( #{sprintf('%0.2f', percent_chapters * 100)} % )"
+
+  
+  # draft 2 - use the '<====' flag
+  if revised_words > 0
+    puts "  | "
+    puts "  | todays' revision:  #{revised_words_delta.commify} words"
+    puts "  | days_since_start:  #{days_since_start}"
+    puts "  | average rate:      #{revise_rate.commify} words / day"
+    puts "  | revised:           #{revised_words.commify} / #{actual_words.commify} words ( #{sprintf('%0.2f', revised_fraction * 100)} % )"
+    puts "  | to go:             #{to_revise_words.commify} words ;  #{to_go_days.commify} days ( #{(Date.today + to_go_days).strftime('%d %b %Y')} )"
+    puts "  | "    
+
+  end 
+
+  puts "  | "
+  puts "  | days since start:  #{days_since_start}"
+  puts "  | average rate:      #{write_rate} words / day"
+  puts "  | today's word delta: + #{words_plus.commify} "
+  if revised_words == 0
+    puts "  | to go:              #{to_go_words.commify} words ;  #{to_go_days.commify} days ( #{(Date.today + to_go_days).strftime('%d %b %Y')} )"
+  end
+
+  puts "  +--------------------"
+  puts ""
+
+
+
+end
+
+
+task :chapters do |t|
+
+  ret           = get_chapter_hash()
+  done          = ret[:done]
+  notdone       = ret[:notdone]
+  avg           = ret[:avg]
+  chapter_words = ret[:chapter_words]
+  chapter_titles = ret[:chapter_titles]
+  std_dev       = ret[:std_dev]
+
+  puts ""
+  puts "  +--------------------"
+  puts "  | #{title}"
+  puts "  | "
+  puts "  |  ch                                           words      stddevs"
+  puts "  |  ---------------------------------------------------------------"
+  chapter_words.each_pair do |num, words|
+    sigma =  ((words - avg).abs / std_dev).floor
+    puts "  | #{sprintf('%3i', num)}  #{sprintf('%-38s', chapter_titles[num][0...38])} #{sprintf('%6s',words.commify)}       #{ (words > avg ? "+":"-") * sigma} "
+  end
+
+  
+  puts "  |\n"
+  puts "  |\n"
+  puts "  | * #{done} chapters done, avg words = #{avg.commify}"
+  puts "  | * stddev = #{std_dev.floor}"
+  puts "  | * #{notdone} chapters not done"
+  puts "  | * target words @ this rate = #{ ((chapter_words.size * avg) ).commify}"
+  puts "  | * target pages @ this rate = #{ ((chapter_words.size * avg) / 250).commify}"
+  puts "  +--------------------"
+  puts ""
+end
+
+task :clean do |t|
+  `rm  '#story.txt#' '#story.txt' '.#story.txt' 2> /dev/null`
+end
+
+# task :todo do |t|
+#   puts `cat #{outline_file}  | grep "* ============== 2A" -B 100000 | grep "\\(^\*\\|TODO\\)" `
+# end
+
+task :outlines do |t|
+  subdir = "./notes/outlines/"
+  [
+    "06c_outline_wyatt.txt" ,
+    "13_domestic.txt" ].each do |f|
+    infile_name = "#{subdir}#{f}"
+
+    puts "========== #{infile_name}"
+    count = 0
+    first = true
+    File.open(infile_name, "r") do |infile_h|
+      
+      while (line = infile_h.gets)
+        if line.match(/^\*\* /)
+          if first
+            first = false
+          else
+            puts "scene = #{count}"
+            count = 0
+          end
+          puts  line
+        elsif line.match(/^\s*scene/)
+          count += 1
+        end
+      end
+    end
+    puts "scene = #{count}"
+  end
+end
