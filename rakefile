@@ -1,3 +1,14 @@
+# usage
+# -----
+#
+#  two modes:
+#      - regular:         rake
+#      - chapter listing: rake chapters
+#
+#  can also be supplied with a git hash, to apply to an earlier version
+#      - regular:         rake default[047b60168aa7ee1ba2d1d9cd515ddf749ccee8f3]
+#      - chapter listing: rake chapters[047b60168aa7ee1ba2d1d9cd515ddf749ccee8f3]
+
 require 'date'
 require 'date'
 
@@ -15,6 +26,7 @@ end
 
 
 target_file       = "story.txt"
+unused_file       = "unused_text.txt"  # where we store unused snippets of text
 title             = "The Aristillus Engineering Club and the Journey to the Center of Mars"
 target_words      = 123000
 date_start        = Date.parse('22 May 2023') # Date.parse('22 July 2022')
@@ -27,8 +39,14 @@ words_per_page    = 250
 # avg            - avg wordsize of finished chapters
 # std_dev        - std dev of chapter size
 
-def get_chapter_hash()
-  file = File.open("story.txt", "r")
+def get_chapter_hash(git_hash)
+
+  if git_hash
+    `git show #{git_hash}:./story.txt > /tmp/oldver_story.txt`
+    file = File.open("/tmp/oldver_story.txt", "r")
+  else
+    file = File.open("story.txt", "r")
+  end
   contents = file.read
   arr = contents.split("== chapter")
   arr = arr.slice(1..9999)
@@ -55,6 +73,7 @@ def get_chapter_hash()
   size_cutoff = 1000
 
   done = chapter_words.select { |ch,words|  words > size_cutoff}.count
+  done = 1 if done == 0
   notdone = chapter_words.size - done
   avg = chapter_words.select { |ch,words|  words > size_cutoff}.sum{|ch,words| words} / done
 
@@ -82,7 +101,7 @@ end
 #
 task :default, [:git_hash] do |t, args|
 
-  ret = get_chapter_hash()
+  ret = get_chapter_hash(args[:git_hash])
 
   #  puts "ret = #{ret.inspect}"
   
@@ -106,7 +125,13 @@ task :default, [:git_hash] do |t, args|
   words_plus       = `git diff  #{args[:git_hash]} #{target_file}  | grep "^\+" | wc -w`.to_i
   words_delta      = words_plus - words_minus
 
-  revised_words_before = `git show HEAD:./#{target_file} | grep "<===" -B 100000 | wc -w`.to_i
+  unused_minus      = `git diff  #{args[:git_hash]} #{unused_file}  | grep "^\-" | wc -w`.to_i
+  unused_plus       = `git diff  #{args[:git_hash]} #{unused_file}  | grep "^\+" | wc -w`.to_i
+  unused_delta      = unused_plus - unused_minus
+
+
+  # XXX this is wrong ; doesn't work when a hash is passed in
+  revised_words_before = `git show #{args[:git_hash]||'HEAD'}:./#{target_file} | grep "<===" -B 100000 | wc -w`.to_i
   revised_words = `cat #{target_file} | grep "<===" -B 100000 | wc -w`.to_i
   revised_words_delta = revised_words - revised_words_before
   revised_fraction = revised_words   * 1.000  / actual_words
@@ -128,8 +153,8 @@ task :default, [:git_hash] do |t, args|
   # draft 2 - use the '<====' flag
   if revised_words > 0
     puts "  | "
-    puts "  | todays' revision:  #{revised_words_delta.commify} words"
-    puts "  | days_since_start:  #{days_since_start}"
+    puts "  | today's revision:  + #{revised_words_delta.commify} words"
+    puts "  | days since start:  #{days_since_start}"
     puts "  | average rate:      #{revise_rate.commify} words / day"
     puts "  | revised:           #{revised_words.commify} / #{actual_words.commify} words ( #{sprintf('%0.2f', revised_fraction * 100)} % )"
     puts "  | to go:             #{to_revise_words.commify} words ;  #{to_go_days.commify} days ( #{(Date.today + to_go_days).strftime('%d %b %Y')} )"
@@ -138,9 +163,11 @@ task :default, [:git_hash] do |t, args|
   end 
 
   puts "  | "
+  puts "  | moved to unused:    #{words_delta > 0 ? "+" : ""}#{unused_delta.commify}"
+  puts "  | "
+  puts "  | today's word delta: #{words_delta > 0 ? "+" : ""}#{words_delta.commify} "
   puts "  | days since start:  #{days_since_start}"
-  puts "  | average rate:      #{write_rate} words / day"
-  puts "  | today's word delta: + #{words_plus.commify} "
+  puts "  | average rate:      #{write_rate.commify} words / day"
   if revised_words == 0
     puts "  | to go:              #{to_go_words.commify} words ;  #{to_go_days.commify} days ( #{(Date.today + to_go_days).strftime('%d %b %Y')} )"
   end
@@ -153,9 +180,9 @@ task :default, [:git_hash] do |t, args|
 end
 
 
-task :chapters do |t|
+task :chapters, [:git_hash] do |t, args|
 
-  ret           = get_chapter_hash()
+  ret           = get_chapter_hash(args[:git_hash])
   done          = ret[:done]
   notdone       = ret[:notdone]
   avg           = ret[:avg]
