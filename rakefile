@@ -31,6 +31,7 @@ title             = "The Aristillus Engineering Club and the Journey to the Cent
 target_words      = 123000
 date_start        = Date.parse('22 May 2023') # Date.parse('22 July 2022')
 words_per_page    = 250
+$size_cutoff_chapter = 500  # how big a chapter has to be before we consider that it's been started
 
 # chapter_words  - hash of chapter numbers -> words in each chapter
 # chapter_titles - hash of chapter numbers -> titles
@@ -70,14 +71,12 @@ def get_chapter_hash(git_hash)
     chapter_titles[num] = title
   end
 
-  size_cutoff = 1000
-
-  done = chapter_words.select { |ch,words|  words > size_cutoff}.count
+  done = chapter_words.select { |ch,words|  words > $size_cutoff_chapter}.count
   done = 1 if done == 0
   notdone = chapter_words.size - done
-  avg = chapter_words.select { |ch,words|  words > size_cutoff}.sum{|ch,words| words} / done
+  avg = chapter_words.select { |ch,words|  words > $size_cutoff_chapter}.sum{|ch,words| words} / done
 
-  variance_array = chapter_words.select { |ch,words|  words > size_cutoff}.map{|ch,words| (words - avg) }
+  variance_array = chapter_words.select { |ch,words|  words > $size_cutoff_chapter}.map{|ch,words| (words - avg) }
   
   std_dev = Math.sqrt(variance_array.sum { |v| v ** 2} / variance_array.size)
 
@@ -129,6 +128,14 @@ task :default, [:git_hash] do |t, args|
   unused_plus       = `git diff  #{args[:git_hash]} #{unused_file}  | grep "^\+" | wc -w`.to_i
   unused_delta      = unused_plus - unused_minus
 
+  cat_str =  if args[:git_hash]
+               "git show #{args[:git_hash]}:./story.txt"
+             else
+               "cat story.txt"
+             end
+  xxx_count =   ` #{cat_str} | grep "XXX" | wc -l`.to_i
+  yyy_count =   ` #{cat_str} | grep "YYY" | wc -l`.to_i
+  
 
   # XXX this is wrong ; doesn't work when a hash is passed in
   revised_words_before = `git show #{args[:git_hash]||'HEAD'}:./#{target_file} | grep "<===" -B 100000 | wc -w`.to_i
@@ -148,12 +155,12 @@ task :default, [:git_hash] do |t, args|
   puts "  | story :    #{actual_words.commify} / #{target_words&.commify}  words ( #{sprintf('%0.2f', percent_words * 100)} % )"
   puts "  |            #{actual_words / words_per_page} / #{target_words / words_per_page}  pages"
   puts "  |            #{actual_chapters} / #{target_chapters} chapters ( #{sprintf('%0.2f', percent_chapters * 100)} % )"
+  puts "  | "
 
   
   # draft 2 - use the '<====' flag
   if revised_words > 0
-    puts "  | "
-    puts "  | today's revision:  + #{revised_words_delta.commify} words"
+    puts "  | today's revision:  #{revised_words_delta > 0 ? "+" : ""}#{revised_words_delta.commify} words"
     puts "  | days since start:  #{days_since_start}"
     puts "  | average rate:      #{revise_rate.commify} words / day"
     puts "  | revised:           #{revised_words.commify} / #{actual_words.commify} words ( #{sprintf('%0.2f', revised_fraction * 100)} % )"
@@ -162,7 +169,12 @@ task :default, [:git_hash] do |t, args|
 
   end 
 
-  puts "  | "
+  if xxx_count > 0 || yyy_count > 0
+    puts "  | xxx:              #{xxx_count}"
+    puts "  | yyy:              #{yyy_count}"
+    puts "  | "
+  end
+  
   puts "  | moved to unused:    #{words_delta > 0 ? "+" : ""}#{unused_delta.commify}"
   puts "  | "
   puts "  | today's word delta: #{words_delta > 0 ? "+" : ""}#{words_delta.commify} "
