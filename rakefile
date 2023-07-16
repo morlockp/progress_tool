@@ -10,7 +10,6 @@
 #      - chapter listing: rake chapters[047b60168aa7ee1ba2d1d9cd515ddf749ccee8f3]
 
 require 'date'
-require 'date'
 
 class Numeric
   # from
@@ -100,26 +99,71 @@ end
 #
 task :default, [:git_hash] do |t, args|
 
-  ret = get_chapter_hash(args[:git_hash])
+  verbose = false
 
-  #  puts "ret = #{ret.inspect}"
+  # setup: figure out how to get the text of target version and previous version 
+  #
+  cat_str =  if args[:git_hash]
+               "git show #{args[:git_hash]}:./story.txt"
+             else
+               "cat story.txt"
+             end
   
-  actual_words     = `cat #{target_file}  | wc -w`.to_i
-  
+  cat_prev_str = if args[:git_hash]
+               "git show #{args[:git_hash]}^1:./story.txt"
+             else
+               "git show HEAD:./story.txt"
+                 end
+
+
+
+  # XXX maybe rewrite this function to use 'cat_str' ???
+  #
+  ret = get_chapter_hash(args[:git_hash])
   actual_chapters = ret[:done]
   target_chapters   = ret[:done] + ret[:notdone]
 
   
-  days_since_start = (Date.today - date_start).to_i + 1
+  actual_words     = `#{cat_str}  | wc -w`.to_i
+  
   
   to_go_words = target_words - actual_words
 
   percent_words    =  actual_words * 1.0 / target_words
   percent_chapters =  actual_chapters * 1.0 / target_chapters
-  
+
+  # date and rate
+  #
+  days_since_start = (Date.today - date_start).to_i + 1
   write_rate       = (target_words / days_since_start ).to_i || 1
   to_go_days       = to_go_words / write_rate
 
+  xxx_count_now =   ` #{cat_str} | grep "XXX" | wc -l`.to_i
+  yyy_count_now =   ` #{cat_str} | grep "YYY" | wc -l`.to_i
+
+  xxx_count_prev =   ` #{cat_prev_str} | grep "XXX" | wc -l`.to_i
+  yyy_count_prev =   ` #{cat_prev_str} | grep "YYY" | wc -l`.to_i
+
+  xxx_diff = xxx_count_now - xxx_count_prev
+  yyy_diff = yyy_count_now - yyy_count_prev
+
+  xxx_diff_str = "#{xxx_diff >= 0 ? "+" : ""}#{xxx_diff}"
+  yyy_diff_str = "#{yyy_diff >= 0 ? "+" : ""}#{yyy_diff}"
+  
+
+  if verbose 
+    puts "cat_str = #{cat_str}"
+    puts "cat_prev_str = #{cat_prev_str}"
+    
+    puts "xxx_count_now = #{xxx_count_now}"
+    puts "yyy_count_now = #{yyy_count_now}"
+    
+    puts "xxx_count_prev = #{xxx_count_prev}"
+    puts "yyy_count_prev = #{yyy_count_prev}"
+  end
+  
+  # XXX rewrite this to use "cat_str" and "cat_prev_str"
+  #
   words_minus      = `git diff  #{args[:git_hash]} #{target_file}  | grep "^\-" | wc -w`.to_i
   words_plus       = `git diff  #{args[:git_hash]} #{target_file}  | grep "^\+" | wc -w`.to_i
   words_delta      = words_plus - words_minus
@@ -128,14 +172,7 @@ task :default, [:git_hash] do |t, args|
   unused_plus       = `git diff  #{args[:git_hash]} #{unused_file}  | grep "^\+" | wc -w`.to_i
   unused_delta      = unused_plus - unused_minus
 
-  cat_str =  if args[:git_hash]
-               "git show #{args[:git_hash]}:./story.txt"
-             else
-               "cat story.txt"
-             end
-  xxx_count =   ` #{cat_str} | grep "XXX" | wc -l`.to_i
-  yyy_count =   ` #{cat_str} | grep "YYY" | wc -l`.to_i
-  
+
 
   # XXX this is wrong ; doesn't work when a hash is passed in
   revised_words_before = `git show #{args[:git_hash]||'HEAD'}:./#{target_file} | grep "<===" -B 100000 | wc -w`.to_i
@@ -169,9 +206,9 @@ task :default, [:git_hash] do |t, args|
 
   end 
 
-  if xxx_count > 0 || yyy_count > 0
-    puts "  | xxx:              #{xxx_count}"
-    puts "  | yyy:              #{yyy_count}"
+  if xxx_count_now > 0 || yyy_count_now > 0 || xxx_count_prev > 0 || yyy_count_prev > 0
+    puts "  | xxx:              #{xxx_count_now} (#{xxx_diff_str})"
+    puts "  | yyy:              #{yyy_count_now} (#{yyy_diff_str})"
     puts "  | "
   end
   
