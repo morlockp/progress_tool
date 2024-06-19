@@ -29,8 +29,7 @@ class Numeric
 end
 
 
-## read config file
-#
+## read config file#
 configfile = "./.rakefile.yaml"
 if FileTest.exists?(configfile)
   config  = YAML.load_file(configfile)
@@ -82,6 +81,14 @@ def get_chapter_hash(config, git_hash)
     chapter_words[chap_num] = word_count
   end
 
+  chapter_arrows = {}
+  arr.each do |text|
+    text.match(/ (\d+)/)
+    chap_num = $1.to_i
+    chapter_arrows[chap_num] = text.match?(/<---/)
+  end
+
+  
   chapter_titles = {}
   arr.each do |text|
     text.match(/ (\d+)/)
@@ -105,6 +112,7 @@ def get_chapter_hash(config, git_hash)
 
   return { :chapter_words => chapter_words,
            :chapter_titles =>chapter_titles,
+           :chapter_arrows =>chapter_arrows,
            :done          => done,
            :notdone       => notdone,
            :avg           => avg,
@@ -243,7 +251,7 @@ task :default, [:git_hash] do |t, args|
 
   end 
 
-  if xxx_count_now > 0 || yyy_count_now > 0 || xxx_count_prev > 0 || yyy_count_prev > 0
+  if false && ( xxx_count_now > 0 || yyy_count_now > 0 || xxx_count_prev > 0 || yyy_count_prev > 0)
     puts "  | xxx:              #{xxx_count_now} (#{xxx_diff_str})"
     puts "  | yyy:              #{yyy_count_now} (#{yyy_diff_str})"
     puts "  | zzz:              #{zzz_count_now} (#{zzz_diff_str})"
@@ -266,19 +274,20 @@ task :default, [:git_hash] do |t, args|
 
 end
 
-
+# alias
+task :ch => :chapters
+ 
 task :chapters, [:git_hash] do |t, args|
 
   ret           = get_chapter_hash(config, args[:git_hash])
 
-  puts "ret = #{ret.inspect}"
-  
-  done          = ret[:done]
-  notdone       = ret[:notdone]
-  avg           = ret[:avg]
-  chapter_words = ret[:chapter_words]
+  done           = ret[:done]
+  notdone        = ret[:notdone]
+  avg            = ret[:avg]
+  chapter_words  = ret[:chapter_words]
   chapter_titles = ret[:chapter_titles]
-  std_dev       = ret[:std_dev]
+  std_dev        = ret[:std_dev]
+  arrows         = ret[:chapter_arrows]
 
   puts ""
   puts "  +--------------------"
@@ -288,7 +297,7 @@ task :chapters, [:git_hash] do |t, args|
   puts "  |  ---------------------------------------------------------------"
     chapter_words.each_pair do |num, words|
       sigma = std_dev == 0.0 ? 0 : ((words - avg).abs / std_dev).floor
-      puts "  | #{sprintf('%3i', num)}  #{sprintf('%-38s', chapter_titles[num][0...38])} #{sprintf('%6s',words.commify)}       #{ (words > avg ? "+":"-") * sigma} "
+      puts "  | #{sprintf('%3i', num)}  #{sprintf('%-38s', chapter_titles[num][0...38])} #{sprintf('%6s',words.commify)}    #{ sprintf('%5s',(words > avg ? "+":"-") * sigma)}     #{arrows[num] ? "<--" : ""}"
   end
 
   
