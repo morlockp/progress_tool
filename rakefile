@@ -120,6 +120,25 @@ def get_chapter_hash(config, git_hash)
   
 end
 
+task :init do
+  yaml_file = ".rakefile.yaml"
+  if FileTest.exists?(yaml_file)
+    puts "*** #{yaml_file} already exists; just edit it"
+  end
+  File.open(yaml_file, "w") do |file|
+    file.write(<<-STRING
+---
+:target_file: ./story.txt
+:title: "title goes here"
+:target_words: 125000
+:date_start: '#{Date.today}'
+:chapter_head_tag: '** chapter'
+STRING
+              )
+  end
+end
+
+
 # takes an optional git hash in case you've already committed the files and still want to run the command
 #
 # without git hash spec:
@@ -273,6 +292,7 @@ task :default, [:git_hash] do |t, args|
 
 
 end
+
 
 # alias
 task :ch => :chapters
