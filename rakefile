@@ -72,31 +72,37 @@ def get_chapter_hash(config, git_hash)
   arr = arr.slice(1..9999)
 
   chapter_words = {}
+  chapter_arrows = {}
+  chapter_titles = {}
+  ii = 0
   arr.each do |text|
-    text.match(/ (\d+)/)
+    ii += 1
+    title = text.split("\n")[0]
+    title.match(/ (\d+)/)
+    chapter_num_str = $1
+
     # bug: drop the first line here
-    chap_num = $1.to_i
+    if chapter_num_str
+      chap_num = $1.to_i
+    else
+      chap_num = ii
+    end
+
     raise "*** error: duplicate chapter #{chap_num}" unless chapter_words[chap_num].nil?
     word_count = text.split.size
+
+
     chapter_words[chap_num] = word_count
-  end
 
-  chapter_arrows = {}
-  arr.each do |text|
-    text.match(/ (\d+)/)
-    chap_num = $1.to_i
     chapter_arrows[chap_num] = text.match?(/<---/)
+
+    title = title
+    chapter_titles[chap_num] = title
+
   end
 
+  puts "HERE = #{chapter_words.inspect}"
   
-  chapter_titles = {}
-  arr.each do |text|
-    text.match(/ (\d+)/)
-    # bug: drop the first line here
-    num = $1.to_i
-    title = text.split("\n").first.split(":")[1]
-    chapter_titles[num] = title
-  end
 
   done = chapter_words.select { |ch,words|  words > $size_cutoff_chapter}.count
   done = 1 if done == 0
@@ -136,6 +142,7 @@ task :init do
 STRING
               )
   end
+  puts "created file ./#{yaml_file}"
 end
 
 
@@ -198,7 +205,7 @@ task :default, [:git_hash] do |t, args|
 
 
   xxx_count_prev =   ` #{cat_prev_str} | grep "XXX" | wc -l`.to_i
-#exit
+
   yyy_count_prev =   ` #{cat_prev_str} | grep "YYY" | wc -l`.to_i
   zzz_count_prev =   ` #{cat_prev_str} | grep "ZZZ" | wc -l`.to_i
 
@@ -210,7 +217,7 @@ task :default, [:git_hash] do |t, args|
   yyy_diff_str = "#{yyy_diff >= 0 ? "+" : ""}#{yyy_diff}"
   zzz_diff_str = "#{yyy_diff >= 0 ? "+" : ""}#{zzz_diff}"
   
-#  exit
+
 
   if verbose 
     puts "cat_str = #{cat_str}"
@@ -228,15 +235,27 @@ task :default, [:git_hash] do |t, args|
   
   # XXX rewrite this to use "cat_str" and "cat_prev_str"
   #
-  words_minus      = `git diff  #{args[:git_hash]} #{$target_file}  | grep "^\-" | wc -w`.to_i
-  words_plus       = `git diff  #{args[:git_hash]} #{$target_file}  | grep "^\+" | wc -w`.to_i
+
+  # the '--text' flag to grep forces grep to consider input as text.  This
+  # is useful in case the file somehow has a non ASCII character, and the git diff 
+  # would  merely say "binary files match / don't match"
+  # and then grep would not see any \+ or \- in the output
+  # and thus report "0 words added / deleted"
+  #
+  words_minus      = `git diff  #{args[:git_hash]} #{$target_file}  | grep --text "^\-" | wc -w`.to_i
+  words_plus       = `git diff  #{args[:git_hash]} #{$target_file}  | grep --text "^\+" | wc -w`.to_i
   words_delta      = words_plus - words_minus
 
-  unused_minus      = `git diff  #{args[:git_hash]} #{unused_file}  | grep "^\-" | wc -w`.to_i
-  unused_plus       = `git diff  #{args[:git_hash]} #{unused_file}  | grep "^\+" | wc -w`.to_i
+  unused_minus      = `git diff  #{args[:git_hash]} #{unused_file}  | grep --text "^\-" | wc -w`.to_i
+  unused_plus       = `git diff  #{args[:git_hash]} #{unused_file}  | grep --text "^\+" | wc -w`.to_i
   unused_delta      = unused_plus - unused_minus
 
+  if verbose
 
+    puts "words_minus #{words_minus}"
+    puts "words_plus #{words_plus}"
+
+  end
 
   # XXX this is wrong ; doesn't work when a hash is passed in
   revised_words_before = `git show #{args[:git_hash]||'HEAD'}:./#{$target_file} | grep "<===" -B 100000 | wc -w`.to_i
@@ -279,7 +298,7 @@ task :default, [:git_hash] do |t, args|
   
   puts "  | moved to unused:    #{words_delta > 0 ? "+" : ""}#{unused_delta.commify}"
   puts "  | "
-  puts "  | today's word delta: #{words_delta > 0 ? "+" : ""}#{words_delta.commify} "
+  puts "  | today's word delta: #{words_delta > 0 ? "+" : ""}#{words_delta.commify}   (+#{words_plus} -#{words_minus})"
   puts "  | days since start:   #{days_since_start}"
   puts "  | average rate:       #{write_rate.commify} words / day"
   if revised_words == 0
@@ -317,7 +336,7 @@ task :chapters, [:git_hash] do |t, args|
   puts "  |  ---------------------------------------------------------------"
     chapter_words.each_pair do |num, words|
       sigma = std_dev == 0.0 ? 0 : ((words - avg).abs / std_dev).floor
-      puts "  | #{sprintf('%3i', num)}  #{sprintf('%-38s', chapter_titles[num][0...38])} #{sprintf('%6s',words.commify)}    #{ sprintf('%5s',(words > avg ? "+":"-") * sigma)}     #{arrows[num] ? "<--" : ""}"
+      puts "  | #{sprintf('%3i', num) }  #{sprintf('%-38s', chapter_titles[num][0...38])} #{sprintf('%6s',words.commify)}    #{ sprintf('%5s',(words > avg ? "+":"-") * sigma)}     #{arrows[num] ? "<--" : ""}"
   end
 
   
