@@ -77,8 +77,8 @@ def get_chapter_hash(config, git_hash)
   ii = 0
   arr.each do |text|
     ii += 1
-    title = text.split("\n")[0]
-    title.match(/ (\d+)/)
+    title_line = text.split("\n")[0]
+    title_line.match(/ (\d+)/)
     chapter_num_str = $1
 
     # bug: drop the first line here
@@ -96,13 +96,11 @@ def get_chapter_hash(config, git_hash)
 
     chapter_arrows[chap_num] = text.match?(/<---/)
 
-    title = title
+    title = title_line.split(":")[1]
     chapter_titles[chap_num] = title
 
   end
 
-  puts "HERE = #{chapter_words.inspect}"
-  
 
   done = chapter_words.select { |ch,words|  words > $size_cutoff_chapter}.count
   done = 1 if done == 0
@@ -298,7 +296,7 @@ task :default, [:git_hash] do |t, args|
   
   puts "  | moved to unused:    #{words_delta > 0 ? "+" : ""}#{unused_delta.commify}"
   puts "  | "
-  puts "  | today's word delta: #{words_delta > 0 ? "+" : ""}#{words_delta.commify}   (+#{words_plus} -#{words_minus})"
+  puts "  | today's word delta: #{words_delta > 0 ? "+" : ""}#{words_delta.commify}   (+#{words_plus.commify} -#{words_minus.commify})"
   puts "  | days since start:   #{days_since_start}"
   puts "  | average rate:       #{write_rate.commify} words / day"
   if revised_words == 0
@@ -343,7 +341,7 @@ task :chapters, [:git_hash] do |t, args|
   puts "  |\n"
   puts "  |\n"
   puts "  | * #{done} chapters done, avg words = #{avg.commify}"
-  puts "  | * stddev = #{std_dev.floor}"
+  puts "  | * stddev = #{std_dev.floor.commify}"
   puts "  | * #{notdone} chapters not done"
   puts "  | * target words @ this rate = #{ ((chapter_words.size * avg) ).commify}"
   puts "  | * target pages @ this rate = #{ ((chapter_words.size * avg) / 250).commify}"
@@ -387,4 +385,8 @@ task :outlines do |t|
     end
     puts "scene = #{count}"
   end
+end
+
+task :clean do
+  `rm -f *~ .*~ #* .\#* '\#*' `
 end
