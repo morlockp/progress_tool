@@ -4,19 +4,20 @@ A short Ruby script I use for tracking my writing and revising progress.
 
 To set up:
 
-1. git clone locally
-1. edit the file, change variables
-  1. `target_file`
-  1. `title`
-  1. `target_words`
-  1. `date_start`
+1. git clone this repo
+1. create a new directory for your writing project
+1. in that directory, start your your story or novel in file named `story.txt`
+1. in that directory, run `rake init` ; this creates a file `.rakefile.yaml`.  
+1. start each chapter with a string like "* chapter 1: intro"
+1. customize the `rakefile.yaml` as you see fit.  You can change target words, start date, chapter headings, etc.
 
+To use on your first (writing) pass:
 
-To use:
-
-1. write your story or novel in file `story.txt`
-1. start each chapter with a string like "== chapter 1: intro"
-1. to see your progress, run from the command line `rake`
+1. to see a compact view progress stats, run from the command line `rake`
 1. to get an overview of your chapter sizes run `rake chapters`
-1. once you're done with the first pass, begin revision.  Put the string "<==========" in your story file
-1. ...and once you've done this, invocations of `rake` will generate new output, which has data on your REVISION
+
+To use on a revision pass:
+
+1. Put the string "<---" in your story file to mark how far you've progressed in revising.
+1. Having done this, invocations of `rake` and `rake chapters` will generate expanded output
+

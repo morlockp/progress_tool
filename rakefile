@@ -256,8 +256,8 @@ task :default, [:git_hash] do |t, args|
   end
 
   # XXX this is wrong ; doesn't work when a hash is passed in
-  revised_words_before = `git show #{args[:git_hash]||'HEAD'}:./#{$target_file} | grep "<===" -B 100000 | wc -w`.to_i
-  revised_words = `cat #{$target_file} | grep "<===" -B 100000 | wc -w`.to_i
+  revised_words_before = `git show #{args[:git_hash]||'HEAD'}:./#{$target_file} | grep "<---" -B 100000 | wc -w`.to_i
+  revised_words = `cat #{$target_file} | grep "<---" -B 100000 | wc -w`.to_i
   revised_words_delta = revised_words - revised_words_before
   revised_fraction = revised_words   * 1.000  / actual_words
   if revised_words > 0
@@ -276,7 +276,7 @@ task :default, [:git_hash] do |t, args|
   puts "  | "
 
   
-  # draft 2 - use the '<====' flag
+  # draft 2 - use the '<---' flag
   if revised_words > 0
     puts "  | today's revision:  #{revised_words_delta > 0 ? "+" : ""}#{revised_words_delta.commify} words"
     puts "  | days since start:  #{days_since_start}"
