@@ -31,7 +31,7 @@ end
 
 ## read config file#
 configfile = "./.rakefile.yaml"
-if FileTest.exists?(configfile)
+if FileTest.exist?(configfile)
   config  = YAML.load_file(configfile)
 else
   config  = { :target_file => "story.txt",
@@ -126,7 +126,7 @@ end
 
 task :init do
   yaml_file = ".rakefile.yaml"
-  if FileTest.exists?(yaml_file)
+  if FileTest.exist?(yaml_file)
     puts "*** #{yaml_file} already exists; just edit it"
   end
   File.open(yaml_file, "w") do |file|
