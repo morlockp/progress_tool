@@ -103,7 +103,7 @@ def get_chapter_hash(config, git_hash)
 
 
   done = chapter_words.select { |ch,words|  words > $size_cutoff_chapter}.count
-  done = 1 if done == 0
+  done = [done, 1].max
   notdone = chapter_words.size - done
   
   avg = chapter_words.select { |ch,words|  words > $size_cutoff_chapter}.sum{|ch,words| words} / done
@@ -158,17 +158,17 @@ task :default, [:git_hash] do |t, args|
 
   # setup: figure out how to get the text of target version and previous version 
   #
-  cat_str =  if args[:git_hash]
-               "git show #{args[:git_hash]}:./#{$target_file}"
+  cat_str = if args[:git_hash]
+               `git show #{args[:git_hash]}:#{$target_file}`
              else
-               "cat #{$target_file}"
+               File.read($target_file)
              end
-  
+
   cat_prev_str = if args[:git_hash]
-                   "git show #{args[:git_hash]}^1:#{$target_file}"
-                 else
-                   "git show HEAD:./#{$target_file}"
-                 end
+                    `git show #{args[:git_hash]}^1:#{$target_file}`
+                  else
+                    `git show HEAD:#{$target_file}`
+                  end
 
 
 
@@ -180,7 +180,7 @@ task :default, [:git_hash] do |t, args|
   target_chapters   = ret[:done] + ret[:notdone]
 
   
-  actual_words     = `#{cat_str}  | wc -w`.to_i
+  actual_words = cat_str.split.size
   
   
   to_go_words = target_words - actual_words
@@ -190,26 +190,26 @@ task :default, [:git_hash] do |t, args|
 
   # date and rate
   #
-  days_since_start = (Date.today - date_start).to_i + 1
-  write_rate       = (actual_words / days_since_start ).to_i || 1
+  days_since_start = [(Date.today - date_start).to_i + 1, 1].max
+  write_rate       = [(actual_words / days_since_start ).to_i, 1].max
   to_go_days       = to_go_words / write_rate
 
 
 
   
-  xxx_count_now =   ` #{cat_str} | grep "XXX" | wc -l`.to_i
-  yyy_count_now =   ` #{cat_str} | grep "YYY" | wc -l`.to_i
-  zzz_count_now =   ` #{cat_str} | grep "ZZZ" | wc -l`.to_i
+  xxx_count_now = cat_str.scan(/XXX/).size
+  yyy_count_now = cat_str.scan(/YYY/).size
+  zzz_count_now = cat_str.scan(/ZZZ/).size
 
 
-  xxx_count_prev =   ` #{cat_prev_str} | grep "XXX" | wc -l`.to_i
+  xxx_count_prev = cat_prev_str.scan(/XXX/).size
 
-  yyy_count_prev =   ` #{cat_prev_str} | grep "YYY" | wc -l`.to_i
-  zzz_count_prev =   ` #{cat_prev_str} | grep "ZZZ" | wc -l`.to_i
+  yyy_count_prev = cat_prev_str.scan(/YYY/).size
+  zzz_count_prev = cat_prev_str.scan(/ZZZ/).size
 
   xxx_diff = xxx_count_now - xxx_count_prev
   yyy_diff = yyy_count_now - yyy_count_prev
-  zzz_diff = zzz_count_now - zzz_count_prev
+  zzz_diff = yyy_count_now - yyy_count_prev
 
   xxx_diff_str = "#{xxx_diff >= 0 ? "+" : ""}#{xxx_diff}"
   yyy_diff_str = "#{yyy_diff >= 0 ? "+" : ""}#{yyy_diff}"
@@ -240,13 +240,13 @@ task :default, [:git_hash] do |t, args|
   # and then grep would not see any \+ or \- in the output
   # and thus report "0 words added / deleted"
   #
-  words_minus      = `git diff  #{args[:git_hash]} #{$target_file}  | grep --text "^\-" | wc -w`.to_i
-  words_plus       = `git diff  #{args[:git_hash]} #{$target_file}  | grep --text "^\+" | wc -w`.to_i
-  words_delta      = words_plus - words_minus
+  words_minus = cat_prev_str.split.size - cat_str.split.size
+  words_plus = cat_str.split.size - cat_prev_str.split.size
+  words_delta = words_plus - words_minus
 
-  unused_minus      = `git diff  #{args[:git_hash]} #{unused_file}  | grep --text "^\-" | wc -w`.to_i
-  unused_plus       = `git diff  #{args[:git_hash]} #{unused_file}  | grep --text "^\+" | wc -w`.to_i
-  unused_delta      = unused_plus - unused_minus
+  unused_minus = File.exist?(unused_file) ? File.read(unused_file).split.size : 0
+  unused_plus = unused_minus # Adjust logic if needed
+  unused_delta = unused_plus - unused_minus
 
   if verbose
 
@@ -256,10 +256,10 @@ task :default, [:git_hash] do |t, args|
   end
 
   # XXX this is wrong ; doesn't work when a hash is passed in
-  revised_words_before = `git show #{args[:git_hash]||'HEAD'}:./#{$target_file} | grep "<---" -B 100000 | wc -w`.to_i
-  revised_words = `cat #{$target_file} | grep "<---" -B 100000 | wc -w`.to_i
+  revised_words_before = cat_prev_str.scan(/<---/).size
+  revised_words = cat_str.scan(/<---/).size
   revised_words_delta = revised_words - revised_words_before
-  revised_fraction = revised_words   * 1.000  / actual_words
+  revised_fraction = revised_words * 1.0 / actual_words
   if revised_words > 0
     revise_rate      = (revised_words / days_since_start ).to_i || 1
     to_revise_words  = actual_words - revised_words
