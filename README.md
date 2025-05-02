@@ -16,6 +16,18 @@ To set up:
 1. to see a compact view progress stats, run from the command line `rake`
 1. to get an overview of your chapter sizes run `rake chapters`
 
+N.B. that if you change text
+
+> Tom said wryly
+
+to
+
+> Tom said innocently
+
+that this should be appear in the statistics as
+
+ today's word delta: +0   (+1 -1)
+
 Note two minor features:
 
 1. you can sprinkle "XXX", "YYY", and "ZZZ" throughout your story file ; these tag open issues of various types (the tool does not define what these issue types are; you can use "XXX"  for "add more details here", "YYY" for "problem w the timeline, etc.).  If one or more of these is present, `rake` stats will refer to these.
@@ -31,3 +43,8 @@ After that you will likely want to edit your story, so ...
 1. Put the string "<---" in your story file to mark how far you've progressed in revising.
 1. Having done this, invocations of `rake` and `rake chapters` will generate expanded output
 
+## To contribute
+
+After making changes, please run `rake self_test`.
+
+Thanks!
