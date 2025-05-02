@@ -48,7 +48,9 @@ date_start        = Date.parse(config[:date_start])
 
 unused_file       = "unused_text.txt"  # where we store unused snippets of text
 words_per_page    = 250
-$size_cutoff_chapter = 500  # how big a chapter has to be before we consider that it's been started
+
+# how big a chapter has to be before we consider that it's been started
+$size_cutoff_chapter = config[:size_cuttoff_chapter] || 500
 
 # chapter_words  - hash of chapter numbers -> words in each chapter
 # chapter_titles - hash of chapter numbers -> titles
@@ -116,7 +118,7 @@ def get_chapter_hash(config, git_hash)
 
   return { :chapter_words => chapter_words,
            :chapter_titles =>chapter_titles,
-           :chapter_arrows =>chapter_arrows,
+          :chapter_arrows =>chapter_arrows,
            :done          => done,
            :notdone       => notdone,
            :avg           => avg,
@@ -240,12 +242,20 @@ task :default, [:git_hash] do |t, args|
   # and then grep would not see any \+ or \- in the output
   # and thus report "0 words added / deleted"
   #
-  words_minus      = `git diff  #{args[:git_hash]} #{$target_file}  | grep --text "^\-" | wc -w`.to_i
-  words_plus       = `git diff  #{args[:git_hash]} #{$target_file}  | grep --text "^\+" | wc -w`.to_i
+  words_minus      = File.file?($target_file) ?
+                       `git diff  #{args[:git_hash]} #{$target_file}  | grep --text "^\-" | wc -w`.to_i
+                       : 0
+  words_plus       = File.file?($target_file) ?
+                       `git diff  #{args[:git_hash]} #{$target_file}  | grep --text "^\+" | wc -w`.to_i
+                       : `wc -w $target_file`
   words_delta      = words_plus - words_minus
 
-  unused_minus      = `git diff  #{args[:git_hash]} #{unused_file}  | grep --text "^\-" | wc -w`.to_i
-  unused_plus       = `git diff  #{args[:git_hash]} #{unused_file}  | grep --text "^\+" | wc -w`.to_i
+  unused_minus      = File.file?(unused_file) ?
+                        `git diff  #{args[:git_hash]} #{unused_file}  | grep --text "^\-" | wc -w`.to_i
+                        : 0
+  unused_plus       = File.file?(unused_file) ?
+                        `git diff  #{args[:git_hash]} #{unused_file}  | grep --text "^\+" | wc -w`.to_i
+                        : 0 
   unused_delta      = unused_plus - unused_minus
 
   if verbose
@@ -330,11 +340,12 @@ task :chapters, [:git_hash] do |t, args|
   puts "  +--------------------"
   puts "  | #{title}"
   puts "  | "
-  puts "  |  ch                                           words      stddevs"
+  puts "  |  ch                                             words      stddevs"
   puts "  |  ---------------------------------------------------------------"
     chapter_words.each_pair do |num, words|
       sigma = std_dev == 0.0 ? 0 : ((words - avg).abs / std_dev).floor
-      puts "  | #{sprintf('%3i', num) }  #{sprintf('%-38s', chapter_titles[num][0...38])} #{sprintf('%6s',words.commify)}    #{ sprintf('%5s',(words > avg ? "+":"-") * sigma)}     #{arrows[num] ? "<--" : ""}"
+	  ch_done  = words > $size_cutoff_chapter ? "✓" : " " 
+      puts "  | #{sprintf('%3i', num) }  #{ch_done} #{sprintf('%-38s', chapter_titles[num][0...38])} #{sprintf('%6s',words.commify)}    #{ sprintf('%5s',(words > avg ? "+":"-") * sigma)}     #{arrows[num] ? "<--" : ""}"
   end
 
   
@@ -389,4 +400,22 @@ end
 
 task :clean do
   `rm -f *~ .*~ #* .\#* '\#*' `
+end
+
+# regression tests for the tool
+task self_test: [ :init ] do
+  puts "here"
+  open("story.txt", "w") { |f| f << <<~ENDSTRING
+         ** chapter 1: one
+         foo bar baz
+         ** chapter 2: two
+         foo bar baz foo bar baz
+         ENDSTRING
+         ** chapter 3: thre
+         foo bar baz foo bar baz baz baz baz
+         ENDSTRING
+  }
+  `rake > output.txt`
+  # `rm ./.rakefile.yaml ./story.txt ./output.txt`
+  
 end
