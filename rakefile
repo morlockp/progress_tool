@@ -156,7 +156,7 @@ end
 #
 task :default, [:git_hash] do |t, args|
 
-  verbose = false
+  verbose = true
 
   # setup: figure out how to get the text of target version and previous version 
   #
@@ -221,7 +221,9 @@ task :default, [:git_hash] do |t, args|
 
   if verbose 
     puts "cat_str = #{cat_str}"
+    puts "----"
     puts "cat_prev_str = #{cat_prev_str}"
+    puts "----"
     
     puts "xxx_count_now = #{xxx_count_now}"
     puts "yyy_count_now = #{yyy_count_now}"
@@ -242,14 +244,23 @@ task :default, [:git_hash] do |t, args|
   # and then grep would not see any \+ or \- in the output
   # and thus report "0 words added / deleted"
   #
-  words_minus = cat_prev_str.split.size - cat_str.split.size
-  words_plus = cat_str.split.size - cat_prev_str.split.size
-  words_delta = words_plus - words_minus
+  # words_minus = cat_prev_str.split.size - cat_str.split.size
+  # words_plus = cat_str.split.size - cat_prev_str.split.size
+  # words_delta = words_plus - words_minus
 
-  unused_minus = File.exist?(unused_file) ? File.read(unused_file).split.size : 0
-  unused_plus = unused_minus # Adjust logic if needed
-  unused_delta = unused_plus - unused_minus
+  # unused_minus = File.exist?(unused_file) ? File.read(unused_file).split.size : 0
+  # unused_plus = unused_minus # Adjust logic if needed
+  # unused_delta = unused_plus - unused_minus
 
+  words_minus      = `git diff  #{args[:git_hash]} #{$target_file}  | grep "^\-" | wc -w`.to_i
+  words_plus       = `git diff  #{args[:git_hash]} #{$target_file}  | grep "^\+" | wc -w`.to_i
+  words_delta      = words_plus - words_minus
+
+  unused_minus      = `git diff  #{args[:git_hash]} #{unused_file}  | grep "^\-" | wc -w`.to_i
+  unused_plus       = `git diff  #{args[:git_hash]} #{unused_file}  | grep "^\+" | wc -w`.to_i
+  unused_delta      = unused_plus - unused_minus
+
+  
   if verbose
 
     puts "words_minus #{words_minus}"
@@ -411,11 +422,12 @@ task :self_test do |t|
     }
     `ln -f -s ../rakefile .`
     `rake init`
+	`cp story.txt story.txt_ORIG`
     `rake > output.txt`
     actual = `grep "today's word delta" output.txt`.gsub!(/\n/, "")
     gold = "  | today's word delta: +13   (+15 -2)"
-    # puts "actual = .#{actual}."
-    # puts "gold   = .#{gold}."
+    puts "actual = .#{actual}."
+    puts "gold   = .#{gold}."
 
     if actual == gold
       puts "self-test passed"
