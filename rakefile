@@ -297,11 +297,14 @@ task :default, [:git_hash] do |t, args|
 
   end 
 
-  if false && ( xxx_count_now > 0 || yyy_count_now > 0 || xxx_count_prev > 0 || yyy_count_prev > 0)
-    puts "  | xxx:              #{xxx_count_now} (#{xxx_diff_str})"
-    puts "  | yyy:              #{yyy_count_now} (#{yyy_diff_str})"
-    puts "  | zzz:              #{zzz_count_now} (#{zzz_diff_str})"
-    puts "  | "
+  if ( xxx_count_now > 0 || xxx_count_prev > 0)
+    puts "  | xxx:                #{xxx_count_now} (#{xxx_diff_str})"
+  end
+  if ( yyy_count_now > 0 || yyy_count_prev > 0)
+    puts "  | yyy:                #{yyy_count_now} (#{yyy_diff_str})"
+  end
+  if ( zzz_count_now > 0 || zzz_count_prev > 0)
+    puts "  | zzz:                #{zzz_count_now} (#{zzz_diff_str})"
   end
   
   puts "  | moved to unused:    #{words_delta > 0 ? "+" : ""}#{unused_delta.commify}"

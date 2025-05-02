@@ -1,4 +1,0 @@
-** chapter 1: one
-foo bar baz
-** chapter 2: two
-foo bar baz foo bar baz
