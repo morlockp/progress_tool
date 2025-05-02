@@ -404,9 +404,8 @@ end
 
 # regression tests for the tool
 task :self_test do |t|
-  puts "here"
   Dir.chdir("test") do
-      open("story.txt", "w") { |f| f << <<~ENDSTRING
+    open("story.txt", "w") { |f| f << <<~ENDSTRING
              ** chapter 1: one
              foo bar baz
              ** chapter 2: two
@@ -414,10 +413,20 @@ task :self_test do |t|
              ** chapter 3: thre
              foo bar baz foo bar baz baz baz baz
              ENDSTRING
-      }
-      `ln -f -s ../rakefile .`
-      `rake init`
-      `rake > output.txt`
-      # `rm ./.rakefile.yaml ./story.txt ./output.txt`
+    }
+    `ln -f -s ../rakefile .`
+    `rake init`
+    `rake > output.txt`
+    actual = `grep "today's word delta" output.txt`.gsub!(/\n/, "")
+    gold = "  | today's word delta: +13   (+15 -2)"
+    # puts "actual = .#{actual}."
+    # puts "gold   = .#{gold}."
+
+    if actual == gold
+      puts "self-test passed"
+    else
+      raise "self-test failed"
+    end
+    `rm ./.rakefile.yaml ./story.txt ./output.txt ./rakefile`
   end
 end
