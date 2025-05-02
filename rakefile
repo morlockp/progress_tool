@@ -403,19 +403,21 @@ task :clean do
 end
 
 # regression tests for the tool
-task self_test: [ :init ] do
+task :self_test do |t|
   puts "here"
-  open("story.txt", "w") { |f| f << <<~ENDSTRING
-         ** chapter 1: one
-         foo bar baz
-         ** chapter 2: two
-         foo bar baz foo bar baz
-         ENDSTRING
-         ** chapter 3: thre
-         foo bar baz foo bar baz baz baz baz
-         ENDSTRING
-  }
-  `rake > output.txt`
-  # `rm ./.rakefile.yaml ./story.txt ./output.txt`
-  
+  Dir.chdir("test") do
+      open("story.txt", "w") { |f| f << <<~ENDSTRING
+             ** chapter 1: one
+             foo bar baz
+             ** chapter 2: two
+             foo bar baz foo bar baz
+             ** chapter 3: thre
+             foo bar baz foo bar baz baz baz baz
+             ENDSTRING
+      }
+      `ln -f -s ../rakefile .`
+      `rake init`
+      `rake > output.txt`
+      # `rm ./.rakefile.yaml ./story.txt ./output.txt`
+  end
 end
