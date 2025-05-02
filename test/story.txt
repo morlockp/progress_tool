@@ -2,5 +2,3 @@
 foo bar baz
 ** chapter 2: two
 foo bar baz foo bar baz
-** chapter 3: thre
-foo bar baz foo bar baz baz baz baz
