@@ -9,7 +9,18 @@ To set up:
 1. in that directory, start your your story or novel in file named `story.txt`
 1. in that directory, run `rake init` ; this creates a file `.rakefile.yaml`.  
 1. start each chapter with a string like "* chapter 1: intro"
-1. customize the `rakefile.yaml` as you see fit.  You can change target words, start date, chapter headings, etc.
+1. customize the `rakefile.yaml` as you see fit.  You can change target words, start date, chapter headings, etc.  
+
+Configuration meanings:
+
+- :target_file: what file holds the story?
+- :title: what story title should be reported in the statistics?
+- :target_words: how long you expect the story to be
+- :date_start: the date you started working on the project
+- :chapter_head_tag: a string that marks the begining of each chapter
+- :size_cuttoff_chapter: a number of words under which the script can conclude the chapter is incomplete
+- :size_cuttoff_ignore_tag: an optional string that tells the script that an overly short (see line above) chapter is actually complete
+
 
 ## To use on your first (writing) pass
 

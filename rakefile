@@ -76,6 +76,7 @@ def get_chapter_hash(config, git_hash)
   chapter_words = {}
   chapter_arrows = {}
   chapter_titles = {}
+  chapter_done = {}
   ii = 0
   arr.each do |text|
     ii += 1
@@ -101,28 +102,32 @@ def get_chapter_hash(config, git_hash)
     title = title_line.split(":")[1]
     chapter_titles[chap_num] = title
 
+    chapter_done[chap_num] = word_count > $size_cutoff_chapter || !! text.match(config[:size_cuttoff_ignore_tag])
+
   end
 
-
-  done = chapter_words.select { |ch,words|  words > $size_cutoff_chapter}.count
+  # figure out how many chapters are done
+  #
+  done = chapter_done.count { |k, v| v }
   done = [done, 1].max
   notdone = chapter_words.size - done
-  
+
+  # find avg chapter length and std dev
+  #
   avg = chapter_words.select { |ch,words|  words > $size_cutoff_chapter}.sum{|ch,words| words} / done
 
-  # compute std dev
-  #
   variance_array = chapter_words.select { |ch,words|  words > $size_cutoff_chapter}.map{|ch,words| (words - avg) }
 
   std_dev = variance_array.size == 0 ? 0 :   Math.sqrt(variance_array.sum { |v| v ** 2} / variance_array.size)
 
-  return { :chapter_words => chapter_words,
-           :chapter_titles =>chapter_titles,
-          :chapter_arrows =>chapter_arrows,
-           :done          => done,
-           :notdone       => notdone,
-           :avg           => avg,
-           :std_dev       => std_dev  }
+  return { :chapter_words  => chapter_words,
+           :chapter_titles => chapter_titles,
+           :chapter_arrows => chapter_arrows,
+           :chapter_done   => chapter_done,
+           :done           => done,
+           :notdone        => notdone,
+           :avg            => avg,
+           :std_dev        => std_dev  }
   
 end
 
@@ -139,6 +144,8 @@ task :init do
 :target_words: 125000
 :date_start: '#{Date.today}'
 :chapter_head_tag: '** chapter'
+:size_cuttoff_chapter: 600
+:size_cuttoff_ignore_tag: 'AAA-chapter-complete'
 STRING
               )
   end
@@ -156,7 +163,7 @@ end
 #
 task :default, [:git_hash] do |t, args|
 
-  verbose = true
+  verbose = false
 
   # setup: figure out how to get the text of target version and previous version 
   #
@@ -341,6 +348,7 @@ task :chapters, [:git_hash] do |t, args|
   chapter_titles = ret[:chapter_titles]
   std_dev        = ret[:std_dev]
   arrows         = ret[:chapter_arrows]
+  chapter_done   = ret[:chapter_done]
 
   puts ""
   puts "  +--------------------"
@@ -350,7 +358,7 @@ task :chapters, [:git_hash] do |t, args|
   puts "  |  ---------------------------------------------------------------"
     chapter_words.each_pair do |num, words|
       sigma = std_dev == 0.0 ? 0 : ((words - avg).abs / std_dev).floor
-	  ch_done  = words > $size_cutoff_chapter ? "✓" : " " 
+	  ch_done  = chapter_done[num] ? "✓" : " " 
       puts "  | #{sprintf('%3i', num) }  #{ch_done} #{sprintf('%-38s', chapter_titles[num][0...38])} #{sprintf('%6s',words.commify)}    #{ sprintf('%5s',(words > avg ? "+":"-") * sigma)}     #{arrows[num] ? "<--" : ""}"
   end
 
