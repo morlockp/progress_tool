@@ -46,7 +46,7 @@ title = config[:title]
 target_words = config[:target_words]
 date_start        = Date.parse(config[:date_start])
 
-unused_file       = "unused_text.txt"  # where we store unused snippets of text
+unused_file       = "unused.txt"  # where we store unused snippets of text
 words_per_page    = 250
 
 # how big a chapter has to be before we consider that it's been started
@@ -72,7 +72,8 @@ def get_chapter_hash(config, git_hash)
   chapter_head_tag = config[:chapter_head_tag] || "== chapter"
   arr = contents.split(chapter_head_tag)
   arr = arr.slice(1..9999)
-
+  arr ||= []
+  
   chapter_words = {}
   chapter_arrows = {}
   chapter_titles = {}
@@ -99,7 +100,7 @@ def get_chapter_hash(config, git_hash)
 
     chapter_arrows[chap_num] = text.match?(/<---/)
 
-    title = title_line.split(":")[1]
+    title = title_line.split(":")[1..].join(":")
     chapter_titles[chap_num] = title
 
     chapter_done[chap_num] = word_count > $size_cutoff_chapter || !! text.match(config[:size_cuttoff_ignore_tag])
@@ -276,15 +277,36 @@ task :default, [:git_hash] do |t, args|
   end
 
   # XXX this is wrong ; doesn't work when a hash is passed in
-  revised_words_before = cat_prev_str.scan(/<---/).size
-  revised_words = cat_str.scan(/<---/).size
+  revised_words_before = cat_prev_str.split(/\s+/).index { |word| word.match?(/^<--+/) } || 0
+  revised_words = cat_str.split(/\s+/).index { |word| word.match?(/^<--+/) } || 0
   revised_words_delta = revised_words - revised_words_before
   revised_fraction = revised_words * 1.0 / actual_words
+
+
+  
   if revised_words > 0
+    revise_start_str = `git log -G "Will XXX" --follow --  story.txt | tac | grep "Date:" | head -1 | cut -d: -f2`
+    if revise_start_str && revise_start_str != ""
+      puts "* revise_start_str = `#{revise_start_str}`"
+      revise_start_date = Date.parse(revise_start_str)
+    else
+      revise_start_date = Date.today
+    end
+	puts "* revise_start_date = #{revise_start_date}"
+    days_since_start = (Date.today - revise_start_date).to_i
+    days_since_start = 1 if days_since_start == 0
+	puts "* days_since_start = #{days_since_start}"
     revise_rate      = (revised_words / days_since_start ).to_i || 1
+    revise_rate      = 100 if revise_rate == 0
+	puts "revise_rate = #{revise_rate.inspect}"
     to_revise_words  = actual_words - revised_words
     to_go_days       = to_revise_words / revise_rate
   end
+
+  expansion_words = (target_words * percent_words / percent_chapters).floor
+  to_go_words_expansion      = expansion_words - actual_words
+  to_go_days_expansion       = to_go_words_expansion / write_rate
+
   
   puts ""
   puts "  +--------------------"
@@ -294,7 +316,13 @@ task :default, [:git_hash] do |t, args|
   puts "  |            #{actual_words / words_per_page} / #{target_words / words_per_page}  pages"
   puts "  |            #{actual_chapters} / #{target_chapters} chapters ( #{sprintf('%0.2f', percent_chapters * 100)} % )"
   puts "  | "
+  puts "  |            expansion ratio: #{sprintf('%2.2f', percent_words / percent_chapters)}"
+  puts "  |            words at this ratio: #{ expansion_words.commify}"
+#  puts "  | "
+#  puts "  |            #{actual_words.commify} / #{expansion_words&.commify}  words ( #{sprintf('%0.2f', (actual_words * 1.0 /expansion_words * 100))} % )"
 
+
+  puts "  | "
   
   # draft 2 - use the '<---' flag
   if revised_words > 0
@@ -324,6 +352,7 @@ task :default, [:git_hash] do |t, args|
   puts "  | average rate:       #{write_rate.commify} words / day"
   if revised_words == 0
     puts "  | to go:              #{to_go_words.commify} words ;  #{to_go_days.commify} days ( #{(Date.today + to_go_days).strftime('%d %b %Y')} )"
+    puts "  | to go (expansion):  #{to_go_words_expansion.commify} words ;  #{to_go_days_expansion.commify} days ( #{(Date.today + to_go_days_expansion).strftime('%d %b %Y')} )"
   end
 
   puts "  +--------------------"
