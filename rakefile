@@ -24,7 +24,7 @@ class Numeric
     int, dec = $1.reverse, $2 ? $2 : ""
     while int.gsub!(/(,|\.|^)(\d{3})(\d)/, '\1\2,\3')
     end
-    int.reverse + dec
+    int.reverse + dec 
   end
 end
 
@@ -34,14 +34,25 @@ configfile = "./.rakefile.yaml"
 if FileTest.exist?(configfile)
   config  = YAML.load_file(configfile)
 else
-  config  = { :target_file => "story.txt",
+  config  = { :target_files => ["story.txt"],
               :title =>"unknown title",
               :target_words => 125000,
-              :date_start => "1 Jan 1970"
+              :date_start => "1 Jan 1970",
+              :revise_start_str => nil
             }
 end
 
-$target_file = config[:target_file]
+# Support both single file (:target_file) and multiple files (:target_files)
+if config[:target_files]
+  $target_files = config[:target_files]
+elsif config[:target_file]
+  $target_files = [config[:target_file]]
+else
+  $target_files = ["story.txt"]
+end
+
+$target_file = $target_files[0]  # for backward compatibility
+
 title = config[:title]
 target_words = config[:target_words]
 date_start        = Date.parse(config[:date_start])
@@ -59,52 +70,73 @@ $size_cutoff_chapter = config[:size_cuttoff_chapter] || 500
 # avg            - avg wordsize of finished chapters
 # std_dev        - std dev of chapter size
 
+# Helper function to read content from target files
+def get_target_content(files, git_hash = nil)
+  content = ""
+  files.each do |file|
+    if git_hash
+      content += `git show #{git_hash}:#{file}`
+    else
+      content += File.read(file)
+    end
+  end
+  content
+end
+
 def get_chapter_hash(config, git_hash)
 
-  if git_hash
-    `git show #{git_hash}:#{$target_file} > /tmp/oldver.txt`
-    file = File.open("/tmp/oldver.txt", "r")
-  else
-    file = File.open($target_file, "r")
-  end
-  contents = file.read
-
   chapter_head_tag = config[:chapter_head_tag] || "== chapter"
-  arr = contents.split(chapter_head_tag)
-  arr = arr.slice(1..9999)
-  arr ||= []
   
   chapter_words = {}
   chapter_arrows = {}
   chapter_titles = {}
   chapter_done = {}
+  chapter_file = {}
   ii = 0
-  arr.each do |text|
-    ii += 1
-    title_line = text.split("\n")[0]
-    title_line.match(/ (\d+)/)
-    chapter_num_str = $1
-
-    # bug: drop the first line here
-    if chapter_num_str
-      chap_num = $1.to_i
+  
+  $target_files.each do |file|
+    if git_hash
+      contents = `git show #{git_hash}:#{file}`
     else
-      chap_num = ii
+      contents = File.read(file)
     end
+    
+    arr = contents.split(chapter_head_tag)
+    arr = arr.slice(1..9999)
+    arr ||= []
+    
+    chapters_in_this_file = Set.new
+    
+    arr.each do |text|
+      ii += 1
+      title_line = text.split("\n")[0]
+      title_line.match(/ (\d+)/)
+      chapter_num_str = $1
 
-    raise "*** error: duplicate chapter #{chap_num}" unless chapter_words[chap_num].nil?
-    word_count = text.split.size
+      # bug: drop the first line here
+      if chapter_num_str
+        chap_num = $1.to_i
+      else
+        chap_num = ii
+      end
+
+      raise "*** error: duplicate chapter #{chap_num} in file #{file}" if chapters_in_this_file.include?(chap_num)
+      chapters_in_this_file.add(chap_num)
+      
+      word_count = text.split.size
 
 
-    chapter_words[chap_num] = word_count
+      chapter_words[chap_num] = word_count
 
-    chapter_arrows[chap_num] = text.match?(/<---/)
+      chapter_arrows[chap_num] = text.match?(/<---/)
 
-    title = title_line.split(":")[1..].join(":")
-    chapter_titles[chap_num] = title
+      title = title_line.split(":")[1..].join(":")
+      chapter_titles[chap_num] = title
 
-    chapter_done[chap_num] = word_count > $size_cutoff_chapter || !! text.match(config[:size_cuttoff_ignore_tag])
-
+      chapter_done[chap_num] = word_count > $size_cutoff_chapter || !! text.match(config[:size_cuttoff_ignore_tag])
+      
+      chapter_file[chap_num] = file
+    end
   end
 
   # figure out how many chapters are done
@@ -125,6 +157,7 @@ def get_chapter_hash(config, git_hash)
            :chapter_titles => chapter_titles,
            :chapter_arrows => chapter_arrows,
            :chapter_done   => chapter_done,
+           :chapter_file   => chapter_file,
            :done           => done,
            :notdone        => notdone,
            :avg            => avg,
@@ -132,6 +165,7 @@ def get_chapter_hash(config, git_hash)
   
 end
 
+desc "create a new .rakefile.yaml"
 task :init do
   yaml_file = ".rakefile.yaml"
   if FileTest.exist?(yaml_file)
@@ -140,7 +174,8 @@ task :init do
   File.open(yaml_file, "w") do |file|
     file.write(<<-STRING
 ---
-:target_file: ./story.txt
+:target_files:
+  - ./story.txt
 :title: "title goes here"
 :target_words: 125000
 :date_start: '#{Date.today}'
@@ -162,22 +197,24 @@ end
 # with git hash spec:
 #   rake default[047b60168aa7ee1ba2d1d9cd515ddf749ccee8f3]
 #
+desc "generate stats - optionally from a git hash with `rake default[<hashID>]`"
 task :default, [:git_hash] do |t, args|
 
   verbose = false
 
   # setup: figure out how to get the text of target version and previous version 
   #
-  cat_str = if args[:git_hash]
-               `git show #{args[:git_hash]}:#{$target_file}`
-             else
-               File.read($target_file)
-             end
+  cat_str = get_target_content($target_files, args[:git_hash])
 
   cat_prev_str = if args[:git_hash]
-                    `git show #{args[:git_hash]}^1:#{$target_file}`
+                    get_target_content($target_files, "#{args[:git_hash]}^1")
                   else
-                    `git show HEAD:#{$target_file}`
+                    # Get previous version from git
+                    content = ""
+                    $target_files.each do |file|
+                      content += `git show HEAD:#{file}`
+                    end
+                    content
                   end
 
 
@@ -260,8 +297,13 @@ task :default, [:git_hash] do |t, args|
   # unused_plus = unused_minus # Adjust logic if needed
   # unused_delta = unused_plus - unused_minus
 
-  words_minus      = `git diff  #{args[:git_hash]} #{$target_file}  | grep "^\-" | wc -w`.to_i
-  words_plus       = `git diff  #{args[:git_hash]} #{$target_file}  | grep "^\+" | wc -w`.to_i
+  # XXX this is wrong ; doesn't work when a hash is passed in
+  words_minus      = 0
+  words_plus       = 0
+  $target_files.each do |file|
+    words_minus += `git diff  #{args[:git_hash]} #{file}  | grep "^\-" | wc -w`.to_i
+    words_plus  += `git diff  #{args[:git_hash]} #{file}  | grep "^\+" | wc -w`.to_i
+  end
   words_delta      = words_plus - words_minus
 
   unused_minus      = `git diff  #{args[:git_hash]} #{unused_file}  | grep "^\-" | wc -w`.to_i
@@ -280,14 +322,16 @@ task :default, [:git_hash] do |t, args|
   revised_words_before = cat_prev_str.split(/\s+/).index { |word| word.match?(/^<--+/) } || 0
   revised_words = cat_str.split(/\s+/).index { |word| word.match?(/^<--+/) } || 0
   revised_words_delta = revised_words - revised_words_before
+  
   revised_fraction = revised_words * 1.0 / actual_words
-
+  revised_words_delta_fraction = revised_words_delta * 1.0 / actual_words
 
   
   if revised_words > 0
-    revise_start_str = `git log -G "Will XXX" --follow --  story.txt | tac | grep "Date:" | head -1 | cut -d: -f2`
+    puts "config[:revise_start_str] = #{config[:revise_start_str]}"
+    revise_start_str = config[:revise_start_date] || `git log -G "<--" --follow --  story.txt | tac | grep "Date:" | head -1 | cut -d: -f2-5`
+    puts "* revise_start_str = `#{revise_start_str}`"
     if revise_start_str && revise_start_str != ""
-      puts "* revise_start_str = `#{revise_start_str}`"
       revise_start_date = Date.parse(revise_start_str)
     else
       revise_start_date = Date.today
@@ -326,11 +370,12 @@ task :default, [:git_hash] do |t, args|
   
   # draft 2 - use the '<---' flag
   if revised_words > 0
-    puts "  | today's revision:  #{revised_words_delta > 0 ? "+" : ""}#{revised_words_delta.commify} words"
-    puts "  | days since start:  #{days_since_start}"
-    puts "  | average rate:      #{revise_rate.commify} words / day"
-    puts "  | revised:           #{revised_words.commify} / #{actual_words.commify} words ( #{sprintf('%0.2f', revised_fraction * 100)} % )"
-    puts "  | to go:             #{to_revise_words.commify} words ;  #{to_go_days.commify} days ( #{(Date.today + to_go_days).strftime('%d %b %Y')} )"
+    puts "  | revision:"
+    puts "  |   today's revision:  #{revised_words_delta > 0 ? "+" : ""}#{revised_words_delta.commify} words (#{revised_words_delta > 0 ? "+" : ""}#{sprintf('%0.2f',revised_words_delta_fraction * 100)} %)"
+    puts "  |   days since start:  #{days_since_start}"
+    puts "  |   average rate:      #{revise_rate.commify} words / day"
+    puts "  |   revised:           #{revised_words.commify} / #{actual_words.commify} words ( #{sprintf('%0.2f', revised_fraction * 100)} % )"
+    puts "  |   to go:             #{to_revise_words.commify} words ;  #{to_go_days.commify} days ( #{(Date.today + to_go_days).strftime('%d %b %Y')} )"
     puts "  | "    
 
   end 
@@ -363,11 +408,14 @@ task :default, [:git_hash] do |t, args|
 end
 
 
-# alias
-task :ch => :chapters
- 
-task :chapters, [:git_hash] do |t, args|
+desc "alias for :chapters"
+task :ch, [:git_hash] do |t, args|
+  Rake::Task[:chapters].invoke(args.values)
+end
 
+desc "generate verbose stats about chapters"
+task :chapters, [:git_hash] do |t, args|
+  puts "args = #{args.inspect}"
   ret           = get_chapter_hash(config, args[:git_hash])
 
   done           = ret[:done]
@@ -378,6 +426,7 @@ task :chapters, [:git_hash] do |t, args|
   std_dev        = ret[:std_dev]
   arrows         = ret[:chapter_arrows]
   chapter_done   = ret[:chapter_done]
+  chapter_file   = ret[:chapter_file]
 
   puts ""
   puts "  +--------------------"
@@ -385,10 +434,17 @@ task :chapters, [:git_hash] do |t, args|
   puts "  | "
   puts "  |  ch                                             words      stddevs"
   puts "  |  ---------------------------------------------------------------"
+  
+  $target_files.each do |file|
+    puts "  | #{file}"
     chapter_words.each_pair do |num, words|
+      next unless chapter_file[num] == file
+      
       sigma = std_dev == 0.0 ? 0 : ((words - avg).abs / std_dev).floor
-	  ch_done  = chapter_done[num] ? "✓" : " " 
+      ch_done  = chapter_done[num] ? "✓" : " " 
       puts "  | #{sprintf('%3i', num) }  #{ch_done} #{sprintf('%-38s', chapter_titles[num][0...38])} #{sprintf('%6s',words.commify)}    #{ sprintf('%5s',(words > avg ? "+":"-") * sigma)}     #{arrows[num] ? "<--" : ""}"
+    end
+    puts "  | ---"
   end
 
   
@@ -405,6 +461,12 @@ end
 
 task :clean do |t|
   `rm  '##{$target_file}#' '##{$target_file}' o 2> /dev/null`
+  `rm  *~ .\#* \#*  2> /dev/null`
+  
+  # do the globbing manually to avoid interactions between Ruby `...` and shell stuff
+  # that was causing globbing not to work
+  
+  system("rm", "--", *Dir.glob("#*#"))  
 end
 
 # task :todo do |t|
