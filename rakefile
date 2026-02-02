@@ -444,11 +444,18 @@ def make_commit_message(git_hash = nil)
 end
 
 desc "git add . && git commit -m <message> -- message uses same X / Y words (Z%) logic"
-task :git, [:git_hash] do |t, args|
-  msg = make_commit_message(args[:git_hash])
+task :git do
+  msg = make_commit_message
   puts "Committing with message: #{msg}"
   system("git", "add", ".")
-  system("git", "commit", "-m", msg)
+
+  # only commit if there are changes to commit
+  changed = `git status --porcelain`
+  if changed.strip == ""
+    puts "No changes to commit."
+  else
+    system("git", "commit", "-m", msg)
+  end
 end
 
 
