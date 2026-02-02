@@ -55,6 +55,10 @@ $target_file = $target_files[0]  # for backward compatibility
 
 title = config[:title]
 target_words = config[:target_words]
+# expose these to helper methods as globals so task methods can access them
+$target_words = target_words
+$title = title
+
 date_start        = Date.parse(config[:date_start])
 
 unused_file       = "unused.txt"  # where we store unused snippets of text
@@ -77,7 +81,11 @@ def get_target_content(files, git_hash = nil)
     if git_hash
       content += `git show #{git_hash}:#{file}`
     else
-      content += File.read(file)
+      if File.exist?(file)
+        content += File.read(file)
+      else
+        warn "*** warning: target file #{file} not found; skipping"
+      end
     end
   end
   content
@@ -99,7 +107,12 @@ def get_chapter_hash(config, git_hash)
     if git_hash
       contents = `git show #{git_hash}:#{file}`
     else
-      contents = File.read(file)
+      if File.exist?(file)
+        contents = File.read(file)
+      else
+        warn "*** warning: target file #{file} not found; skipping in chapter analysis"
+        contents = ""
+      end
     end
     
     arr = contents.split(chapter_head_tag)
@@ -411,6 +424,31 @@ task :default, [:git_hash] do |t, args|
 
 
 
+end
+
+# Helper: build stats used by other tasks (commit message generation)
+def build_basic_stats(git_hash = nil)
+  cat_str = get_target_content($target_files, git_hash)
+  actual_words = cat_str.split.size
+  # use global $target_words (guard for nil/0)
+  percent_words = ($target_words && $target_words > 0) ? (actual_words * 1.0 / $target_words) : 0.0
+  { :actual_words => actual_words, :percent_words => percent_words }
+end
+
+# Build commit message reusing the same formatting as the default output
+def make_commit_message(git_hash = nil)
+  stats = build_basic_stats(git_hash)
+  actual_words = stats[:actual_words]
+  percent_words = stats[:percent_words]
+  "#{$title} : #{actual_words.commify} / #{$target_words&.commify} words ( #{sprintf('%0.2f', percent_words * 100)} % )"
+end
+
+desc "git add . && git commit -m <message> -- message uses same X / Y words (Z%) logic"
+task :git, [:git_hash] do |t, args|
+  msg = make_commit_message(args[:git_hash])
+  puts "Committing with message: #{msg}"
+  system("git", "add", ".")
+  system("git", "commit", "-m", msg)
 end
 
 
