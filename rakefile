@@ -381,6 +381,7 @@ task :default, [:git_hash] do |t, args|
   puts "  | "
   puts "  |            expansion ratio: #{sprintf('%2.2f', percent_words / percent_chapters)}"
   puts "  |            words at this ratio: #{ expansion_words.commify}"
+  puts "  |            pages at this ratio: #{ (expansion_words / words_per_page).commify}"
 #  puts "  | "
 #  puts "  |            #{actual_words.commify} / #{expansion_words&.commify}  words ( #{sprintf('%0.2f', (actual_words * 1.0 /expansion_words * 100))} % )"
 
@@ -455,6 +456,36 @@ task :git do
     puts "No changes to commit."
   else
     system("git", "commit", "-m", msg)
+  end
+end
+
+
+desc "change most recent commit's date to the supplied date (5pm ET). Usage: rake git_change_date['Feb 2 2026']"
+task :git_change_date, [:date_str] do |t, args|
+  if !args[:date_str] || args[:date_str].strip == ""
+    abort "Usage: rake git_change_date['<date string>']"
+  end
+
+  begin
+    parsed = Date.parse(args[:date_str])
+  rescue => e
+    abort "Error parsing date: #{e}"
+  end
+
+  # set time to 5pm Eastern Time (offset -05:00). If DST handling is required,
+  # consider using the 'tzinfo' gem to compute the correct offset for the date.
+  ts = Time.new(parsed.year, parsed.month, parsed.day, 17, 0, 0, "-05:00")
+  date_arg = ts.strftime("%Y-%m-%d %H:%M:%S %z")
+
+  puts "Amending most recent commit with date: #{date_arg}"
+
+  unless system("git", "commit", "--amend", "--date", date_arg, "--no-edit")
+    abort "git commit --amend --date failed"
+  end
+
+  env = { "GIT_COMMITTER_DATE" => date_arg }
+  unless system(env, "git", "commit", "--amend", "--no-edit")
+    abort "GIT_COMMITTER_DATE git commit --amend failed"
   end
 end
 
