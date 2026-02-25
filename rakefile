@@ -739,23 +739,46 @@ def build_interleaved_data(all_data, all_acts, max_chapter)
     end
   end
 
-  # Build interleaved structure with sequential chapter numbering
-  interleaved = []
-  reference_acts = all_acts[$target_files[0]]
+  reference_file = $target_files[0]
+  reference_acts = all_acts[reference_file]
+  
+  # Build a mapping: for each reference file local chapter, which sequential chapter number is it?
+  # This helps us know when to output Acts from the reference file
+  ref_local_to_sequential = {}
   sequential_chapter_num = 0
-
-  (1..max_chapter).each do |ch_num|
-    # Check if any Act line should appear before this chapter
-    reference_acts.each do |act_data|
-      if act_data[:before_chapter] == ch_num
-        interleaved << { :type => :act, :line => act_data[:line] }
+  
+  (1..max_chapter).each do |local_ch_num|
+    $target_files.each do |file|
+      if all_data[file][:chapters][local_ch_num]
+        sequential_chapter_num += 1
+        # Record the sequential chapter number when we encounter a chapter from the reference file
+        if file == reference_file
+          ref_local_to_sequential[local_ch_num] = sequential_chapter_num
+        end
       end
     end
+  end
+  
+  # Build interleaved structure with sequential chapter numbering
+  # Output Acts when we reach the corresponding chapter from the reference file
+  interleaved = []
+  sequential_chapter_num = 0
 
+  (1..max_chapter).each do |local_ch_num|
     $target_files.each do |file|
-      if all_data[file][:chapters][ch_num]
+      if all_data[file][:chapters][local_ch_num]
+        # Before outputting the first chapter from the reference file at this local chapter number,
+        # check if any Acts should appear
+        if file == reference_file
+          reference_acts.each do |act_data|
+            if act_data[:before_chapter] == local_ch_num
+              interleaved << { :type => :act, :line => act_data[:line] }
+            end
+          end
+        end
+        
         sequential_chapter_num += 1
-        chapter_data = all_data[file][:chapters][ch_num]
+        chapter_data = all_data[file][:chapters][local_ch_num]
         source_id = extract_source_id(file)
 
         # Augment the chapter header with source identifier and renumber to sequential
@@ -918,6 +941,17 @@ task :interleave_txt do
   puts "  Source files: #{$target_files.join(', ')}"
 end
 
+# Helper function to convert HTML to DOCX using Pandoc
+# Pandoc properly preserves heading hierarchy
+def convert_html_to_docx_pandoc(html_file, docx_file)
+  cmd = "pandoc #{html_file} -o #{docx_file}"
+  result = system(cmd)
+  
+  unless result && File.exist?(docx_file)
+    abort "*** ERROR: Failed to convert #{html_file} to DOCX using pandoc"
+  end
+end
+
 desc "Interleave chapters from all source files and write to output.html"
 task :interleave_html do
   require 'cgi'
@@ -1011,9 +1045,9 @@ task :interleave_doc do
 
   puts "Wrote interleaved chapters to #{html_file}"
   
-  # Convert HTML to DOCX
+  # Convert HTML to DOCX using pandoc (preserves heading hierarchy)
   docx_file = "output.docx"
-  convert_html_to_docx(html_file, docx_file)
+  convert_html_to_docx_pandoc(html_file, docx_file)
   
   puts "Converted to #{docx_file}"
   puts "  Max chapter number: #{max_chapter}"
