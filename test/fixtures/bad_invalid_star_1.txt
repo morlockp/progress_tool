@@ -1,0 +1,3 @@
+* Not an Act line
+** chapter 1: First
+This file contains an invalid star line that does not start with '* Act'.

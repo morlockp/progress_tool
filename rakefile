@@ -620,3 +620,402 @@ task :self_test do |t|
     `rm ./.rakefile.yaml ./story.txt ./output.txt ./rakefile`
   end
 end
+# Helper: parse chapters and Act lines from a single file
+# Returns hash with :chapters and :acts
+# chapters: { chapter_num => { :title, :full_text, :source_file } }
+# acts: ordered array of { :line => "* Act ...", :before_chapter => chapter_num_or_nil }
+def parse_chapters_and_acts_from_file(file_path, config)
+  chapter_head_tag = config[:chapter_head_tag] || "== chapter"
+  
+  if !File.exist?(file_path)
+    warn "*** warning: file #{file_path} not found"
+    return { :chapters => {}, :acts => [] }
+  end
+  
+  contents = File.read(file_path)
+  lines = contents.split("\n")
+  
+  acts = []
+  chapters = {}
+  current_chapter_num = nil
+  last_act_before_chapter = nil
+  last_act_before_chapter_lineno = nil
+  
+  # First pass: extract Act lines and track which chapter comes after
+  lines.each_with_index do |line, idx|
+    lineno = idx + 1
+    if line =~ /^\* /
+      # Line starts with single asterisk
+      if line !~ /^\* Act /
+        bytes = line.bytes.map { |b| sprintf("%02x", b) }.join(' ')
+        if line =~ /chapter/i
+          abort "*** SYNTAX ERROR in #{file_path}: Line #{lineno}: starts with '*' but not followed by 'Act': #{line.inspect}\n  bytes: #{bytes}\n  Hint: did you forget an extra asterisk for the chapter?"
+        else
+          abort "*** SYNTAX ERROR in #{file_path}: Line #{lineno}: starts with '*' but not followed by 'Act': #{line.inspect}\n  bytes: #{bytes}"
+        end
+      end
+      # Valid Act line - will be associated with the next chapter we see
+      last_act_before_chapter = line
+      last_act_before_chapter_lineno = lineno
+    elsif line =~ /^#{Regexp.escape(chapter_head_tag)}\s/
+      # Extract chapter number
+      line.match(/ (\d+)/)
+      if $1
+        current_chapter_num = $1.to_i
+        # If we have an act waiting, associate it with this chapter
+        if last_act_before_chapter
+          acts << { :line => last_act_before_chapter, :before_chapter => current_chapter_num, :line_no => last_act_before_chapter_lineno }
+          last_act_before_chapter = nil
+          last_act_before_chapter_lineno = nil
+        end
+      end
+    end
+  end
+  
+  # Second pass: parse chapters (excluding Act lines from content)
+  arr = contents.split(chapter_head_tag)
+  arr = arr.slice(1..9999)
+  arr ||= []
+  
+  arr.each do |text|
+    lines = text.split("\n")
+    title_line = lines[0]
+    
+    # Extract chapter number
+    title_line.match(/ (\d+)/)
+    chapter_num_str = $1
+    
+    next unless chapter_num_str
+    
+    chap_num = chapter_num_str.to_i
+    
+    # Remove Act lines from chapter content
+    content_lines = lines.reject { |l| l =~ /^\* Act / }
+    clean_text = content_lines.join("\n")
+    
+    # Reconstruct chapter text
+    full_text = "#{chapter_head_tag}#{clean_text}"
+    
+    chapters[chap_num] = {
+      :title => title_line,
+      :full_text => full_text,
+      :source_file => file_path
+    }
+  end
+  
+  { :chapters => chapters, :acts => acts }
+end
+
+# Helper to extract source identifier from filename (e.g., "lopez" from "story_lopez.txt")
+def extract_source_id(filename)
+  # Remove leading path, extract part after last underscore and before extension
+  basename = File.basename(filename)
+  if basename =~ /^.*?_(.+?)\.\w+$/
+    $1.upcase
+  else
+    basename.upcase
+  end
+end
+
+# Shared function to parse all chapters and Acts, and validate structure
+def build_interleaved_data(all_data, all_acts, max_chapter)
+  # Validate that Act lines are identical across all files (up to the minimum count)
+  # It is acceptable for one file to have fewer Acts at the end than another
+  if all_acts.values.length > 1
+    first_file_acts = all_acts[$target_files[0]]
+    $target_files[1..-1].each do |file|
+      file_acts = all_acts[file]
+      
+      # Only validate Acts up to the minimum count between the two files
+      min_acts = [first_file_acts.length, file_acts.length].min
+      
+      min_acts.times do |idx|
+        if first_file_acts[idx][:line] != file_acts[idx][:line]
+          first_lineno = first_file_acts[idx][:line_no] || "unknown"
+          second_lineno = file_acts[idx][:line_no] || "unknown"
+          abort "*** SYNTAX ERROR: Act line differs between #{$target_files[0]} (line #{first_lineno}) and #{file} (line #{second_lineno}): \n  #{$target_files[0]}: #{first_file_acts[idx][:line]}\n  #{file}: #{file_acts[idx][:line]}"
+        end
+      end
+    end
+  end
+
+  # Build interleaved structure with sequential chapter numbering
+  interleaved = []
+  reference_acts = all_acts[$target_files[0]]
+  sequential_chapter_num = 0
+
+  (1..max_chapter).each do |ch_num|
+    # Check if any Act line should appear before this chapter
+    reference_acts.each do |act_data|
+      if act_data[:before_chapter] == ch_num
+        interleaved << { :type => :act, :line => act_data[:line] }
+      end
+    end
+
+    $target_files.each do |file|
+      if all_data[file][:chapters][ch_num]
+        sequential_chapter_num += 1
+        chapter_data = all_data[file][:chapters][ch_num]
+        source_id = extract_source_id(file)
+
+        # Augment the chapter header with source identifier and renumber to sequential
+        augmented_text = chapter_data[:full_text]
+        augmented_text.sub!(/(\*\* chapter )\d+(:)/, "\\1#{sequential_chapter_num}\\2")
+        augmented_text.sub!(/(\*\* chapter \d+:)/, "\\1 #{source_id}")
+
+        interleaved << { :type => :chapter, :text => augmented_text }
+      end
+    end
+  end
+
+  interleaved
+end
+
+# Process underscores for italics, converting _text_ to <i>text</i>
+# Validates that: italics don't have unintended underscores mid-alphanumeric
+# and that italicized text is <= 40 characters
+def process_italics_for_html(text)
+  result = ""
+  i = 0
+  
+  while i < text.length
+    # Look for opening underscore
+    if text[i] == '_'
+      # Check if this is a middle underscore (between alphanumerics)
+      prev_char = i > 0 ? text[i-1] : nil
+      next_char = i < text.length - 1 ? text[i+1] : nil
+      
+      if prev_char&.match?(/[a-zA-Z0-9]/) && next_char&.match?(/[a-zA-Z0-9]/)
+        # Middle underscore like in "file_1.txt" - warn but keep it
+        context_start = [i - 5, 0].max
+        context_end = [i + 6, text.length].min
+        warn "WARNING: underscore found within alphanumerics at position #{i}: ...#{text[context_start...context_end]}"
+        result += text[i]
+        i += 1
+        next
+      end
+      
+      # Try to find closing underscore
+      close_idx = text.index('_', i + 1)
+      
+      if close_idx.nil?
+        # No closing underscore found - just keep the opening one
+        result += text[i]
+        i += 1
+      else
+        # Extract italicized content
+        italic_content = text[i+1...close_idx]
+        
+        # Check length
+        if italic_content.length > 40
+          abort "*** SYNTAX ERROR: Italicized text is #{italic_content.length} characters (max 40 allowed), likely missing closing underscore:\n  #{italic_content[0..50]}..."
+        end
+        
+        # Check for closing underscore surrounded by alphanumerics
+        next_after_close = close_idx < text.length - 1 ? text[close_idx + 1] : nil
+        if next_char&.match?(/[a-zA-Z0-9]/) && next_after_close&.match?(/[a-zA-Z0-9]/)
+          warn "WARNING: closing underscore found within alphanumerics at position #{close_idx}"
+        end
+        
+        # Convert to HTML italic tag
+        result += "<i>#{CGI.escapeHTML(italic_content)}</i>"
+        i = close_idx + 1
+      end
+    else
+      result += text[i]
+      i += 1
+    end
+  end
+  
+  result
+end
+
+# Format interleaved data as plain text
+def format_interleaved_as_text(interleaved)
+  output_lines = []
+
+  interleaved.each do |item|
+    if item[:type] == :act
+      output_lines << item[:line]
+      output_lines << ""
+    elsif item[:type] == :chapter
+      output_lines << item[:text]
+      output_lines << ""
+    end
+  end
+
+  output_lines.join("\n")
+end
+
+# Format interleaved data as HTML
+def format_interleaved_as_html(interleaved)
+  html_parts = []
+
+  interleaved.each do |item|
+    if item[:type] == :act
+      # Remove leading asterisks from act line: "* Act 1: ..." -> "<h1>Act 1: ...</h1>"
+      act_text = item[:line].sub(/^\*\s*/, "")
+      # Process italics in act text
+      act_text = process_italics_for_html(act_text)
+      html_parts << "<h1>#{act_text}</h1>"
+    elsif item[:type] == :chapter
+      # Parse chapter header and content
+      lines = item[:text].split("\n")
+      # First line is the chapter header (with ** removed)
+      chapter_header = lines[0].sub(/^\*\*\s*/, "")
+      # Process italics in chapter header
+      chapter_header = process_italics_for_html(chapter_header)
+      html_parts << "<h2>#{chapter_header}</h2>"
+      
+      # Remaining lines are chapter content
+      # Split by double newlines to create separate paragraphs
+      content_lines = lines[1..-1] || []
+      content_text = content_lines.join("\n").strip
+      
+      if content_text.length > 0
+        # Split by double newlines to identify paragraphs
+        paragraphs = content_text.split(/\n\s*\n/).map(&:strip).reject(&:empty?)
+        
+        paragraphs.each do |para|
+          # Process italics in each paragraph and replace single newlines with spaces
+          para_text = para.gsub(/\n/, " ").strip
+          para_text = process_italics_for_html(para_text)
+          html_parts << "<p>#{para_text}</p>"
+        end
+      end
+    end
+  end
+
+  html_parts.join("\n")
+end
+
+desc "Interleave chapters from all source files and write to output.txt"
+task :interleave_txt do
+  all_data = {}
+  all_acts = {}
+  max_chapter = 0
+
+  $target_files.each do |file|
+    data = parse_chapters_and_acts_from_file(file, config)
+    all_data[file] = data
+    all_acts[file] = data[:acts]
+    max_chapter = [max_chapter, data[:chapters].keys.max || 0].max
+  end
+
+  if max_chapter == 0
+    abort "No chapters found in any source files"
+  end
+
+  interleaved = build_interleaved_data(all_data, all_acts, max_chapter)
+  output_text = format_interleaved_as_text(interleaved)
+
+  File.open("output.txt", "w") do |f|
+    f.write(output_text)
+  end
+
+  puts "Wrote interleaved chapters to output.txt"
+  puts "  Max chapter number: #{max_chapter}"
+  puts "  Source files: #{$target_files.join(', ')}"
+end
+
+desc "Interleave chapters from all source files and write to output.html"
+task :interleave_html do
+  require 'cgi'
+  
+  all_data = {}
+  all_acts = {}
+  max_chapter = 0
+
+  $target_files.each do |file|
+    data = parse_chapters_and_acts_from_file(file, config)
+    all_data[file] = data
+    all_acts[file] = data[:acts]
+    max_chapter = [max_chapter, data[:chapters].keys.max || 0].max
+  end
+
+  if max_chapter == 0
+    abort "No chapters found in any source files"
+  end
+
+  interleaved = build_interleaved_data(all_data, all_acts, max_chapter)
+  output_html = format_interleaved_as_html(interleaved)
+
+  File.open("output.html", "w") do |f|
+    f.write(output_html)
+  end
+
+  puts "Wrote interleaved chapters to output.html"
+  puts "  Max chapter number: #{max_chapter}"
+  puts "  Source files: #{$target_files.join(', ')}"
+end
+
+# Helper function to convert HTML to DOCX using LibreOffice
+# Uses two-step conversion: HTML → ODT → DOCX for better compatibility
+def convert_html_to_docx(html_file, docx_file)
+  output_dir = File.dirname(docx_file) == '' ? '.' : File.dirname(docx_file)
+  
+  # Step 1: Convert HTML to ODT
+  odt_file = File.join(output_dir, File.basename(html_file, '.*') + '.odt')
+  cmd_html_to_odt = "libreoffice --headless --convert-to odt #{html_file} --outdir #{output_dir}"
+  result = system(cmd_html_to_odt)
+  
+  unless result && File.exist?(odt_file)
+    abort "*** ERROR: Failed to convert #{html_file} to ODT using LibreOffice"
+  end
+  
+  # Step 2: Convert ODT to DOCX
+  cmd_odt_to_docx = "libreoffice --headless --convert-to docx #{odt_file} --outdir #{output_dir}"
+  result = system(cmd_odt_to_docx)
+  
+  unless result && File.exist?(odt_file.gsub(/\.odt$/, '.docx'))
+    abort "*** ERROR: Failed to convert #{odt_file} to DOCX using LibreOffice"
+  end
+  
+  # Rename if output name differs
+  actual_docx = odt_file.gsub(/\.odt$/, '.docx')
+  if actual_docx != docx_file
+    File.rename(actual_docx, docx_file) rescue nil
+  end
+  
+  # Clean up temporary ODT file
+  File.delete(odt_file) if File.exist?(odt_file)
+end
+
+desc "Interleave chapters from all source files and write to output.docx"
+task :interleave_doc do
+  require 'cgi'
+  
+  all_data = {}
+  all_acts = {}
+  max_chapter = 0
+
+  $target_files.each do |file|
+    data = parse_chapters_and_acts_from_file(file, config)
+    all_data[file] = data
+    all_acts[file] = data[:acts]
+    max_chapter = [max_chapter, data[:chapters].keys.max || 0].max
+  end
+
+  if max_chapter == 0
+    abort "No chapters found in any source files"
+  end
+
+  interleaved = build_interleaved_data(all_data, all_acts, max_chapter)
+  output_html = format_interleaved_as_html(interleaved)
+
+  # Write HTML to temporary file
+  html_file = "output.html"
+  File.open(html_file, "w") do |f|
+    f.write(output_html)
+  end
+
+  puts "Wrote interleaved chapters to #{html_file}"
+  
+  # Convert HTML to DOCX
+  docx_file = "output.docx"
+  convert_html_to_docx(html_file, docx_file)
+  
+  puts "Converted to #{docx_file}"
+  puts "  Max chapter number: #{max_chapter}"
+  puts "  Source files: #{$target_files.join(', ')}"
+end

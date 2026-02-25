@@ -1,0 +1,6 @@
+* Act 2: A Different Act
+** chapter 1: First
+This is chapter one from file two.
+
+** chapter 2: Second
+This is chapter two from file two.
