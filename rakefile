@@ -62,7 +62,7 @@ $title = title
 date_start        = Date.parse(config[:date_start])
 
 unused_file       = "unused.txt"  # where we store unused snippets of text
-words_per_page    = 250
+$words_per_page    = 250
 
 # how big a chapter has to be before we consider that it's been started
 $size_cutoff_chapter = config[:size_cuttoff_chapter] || 500
@@ -197,9 +197,38 @@ end
 desc "Show ASCII art progress graph for all target files"
 task :graph do
 
+  def print_progress_summary(title, actual_words, target_words, words_per_page, actual_chapters, target_chapters, percent_words, percent_chapters, expansion_words)
+    puts ""
+    puts "  +--------------------"
+    puts "  | #{title}"
+    puts "  |"
+    puts "  | story :    #{actual_words.commify} / #{target_words&.commify}  words ( #{sprintf('%0.2f', percent_words * 100)} % )"
+    puts "  |            #{actual_words / words_per_page} / #{target_words / words_per_page}  pages"
+    puts "  |            #{actual_chapters} / #{target_chapters} chapters ( #{sprintf('%0.2f', percent_chapters * 100)} % )"
+    puts "  | "
+    puts "  |            expansion ratio: #{sprintf('%2.2f', percent_words / percent_chapters)}"
+    puts "  |            words at this ratio: #{ expansion_words.commify}"
+    puts "  |            pages at this ratio: #{ (expansion_words / words_per_page).commify}"
+    puts "  |"
+    puts "  |            #{actual_words.commify} / #{expansion_words.commify} words at this ratio ( #{sprintf('%0.2f', (actual_words * 1.0 / expansion_words * 100))} % )"
+    puts "  |            #{(actual_words / words_per_page).commify} / #{(expansion_words / words_per_page).commify} pages at this ratio"
+    puts "  | "
+  end
+
+  # Print progress summary at the top
+  config = defined?(config) ? config : YAML.load_file(".rakefile.yaml")
+  cat_str = get_target_content($target_files)
+  actual_words = cat_str.split.size
+  percent_words = ($target_words && $target_words > 0) ? (actual_words * 1.0 / $target_words) : 0.0
+  ch_hash = get_chapter_hash(config, nil)
+  actual_chapters = ch_hash[:done]
+  target_chapters = ch_hash[:done] + ch_hash[:notdone]
+  percent_chapters = (target_chapters > 0) ? (actual_chapters * 1.0 / target_chapters) : 0.0
+  expansion_words = ($target_words * percent_words / percent_chapters).floor rescue 0
+  print_progress_summary($title, actual_words, $target_words, $words_per_page, actual_chapters, target_chapters, percent_words, percent_chapters, expansion_words)
+
   # Step 1: Parse all files for acts and chapters
   file_data = {}
-  config = defined?(config) ? config : YAML.load_file(".rakefile.yaml")
   $target_files.each do |file|
     parsed = parse_chapters_and_acts_from_file(file, config)
     file_data[file] = parsed
@@ -525,6 +554,10 @@ task :default, [:git_hash] do |t, args|
   to_go_days_expansion       = to_go_words_expansion / write_rate
 
   
+
+
+# Move print_progress_summary above :graph task
+def print_progress_summary(title, actual_words, target_words, words_per_page, actual_chapters, target_chapters, percent_words, percent_chapters, expansion_words)
   puts ""
   puts "  +--------------------"
   puts "  | #{title}"
@@ -539,11 +572,20 @@ task :default, [:git_hash] do |t, args|
   puts "  |"
   puts "  |            #{actual_words.commify} / #{expansion_words.commify} words at this ratio ( #{sprintf('%0.2f', (actual_words * 1.0 / expansion_words * 100))} % )"
   puts "  |            #{(actual_words / words_per_page).commify} / #{(expansion_words / words_per_page).commify} pages at this ratio"
-#  puts "  | "
-#  puts "  |            #{actual_words.commify} / #{expansion_words&.commify}  words ( #{sprintf('%0.2f', (actual_words * 1.0 /expansion_words * 100))} % )"
-
-
   puts "  | "
+end
+    # Print progress summary at the top
+    # Reuse logic from default task
+    cat_str = get_target_content($target_files)
+    actual_words = cat_str.split.size
+    percent_words = ($target_words && $target_words > 0) ? (actual_words * 1.0 / $target_words) : 0.0
+    # For chapters, reuse logic from get_chapter_hash
+    ch_hash = get_chapter_hash(config, nil)
+    actual_chapters = ch_hash[:done]
+    target_chapters = ch_hash[:done] + ch_hash[:notdone]
+    percent_chapters = (target_chapters > 0) ? (actual_chapters * 1.0 / target_chapters) : 0.0
+    expansion_words = ($target_words * percent_words / percent_chapters).floor rescue 0
+    print_progress_summary($title, actual_words, $target_words, words_per_page, actual_chapters, target_chapters, percent_words, percent_chapters, expansion_words)
   
   # draft 2 - use the '<---' flag
   if revised_words > 0
