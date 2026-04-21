@@ -19,8 +19,64 @@ Configuration meanings:
 - :date_start: the date you started working on the project
 - :chapter_head_tag: a string that marks the begining of each chapter
 - :size_cuttoff_chapter: a number of words under which the script can conclude the chapter is incomplete
-- :size_cuttoff_ignore_tag: an optional string that tells the script that an overly short (see line above) chapter is actually complete
+- :size_cutoff_force_done: an optional string that tells the script that an overly short (see line above) chapter is actually complete
+- :size_cutoff_force_incomplete: an optional string that tells the script that an overly long chapter should still be treated as incomplete
 
+## Multi-file Interleaving with Pragmas
+
+When using multiple input files (plot threads), you can enforce ordering constraints using pragmas:
+
+### Defining and Requiring Tags
+
+In any chapter, add pragmas as comments:
+
+```
+** chapter 5: The Setup
+# DEFINE-TAG: lopez-turning-point
+
+Content of the chapter...
+```
+
+In another file's chapter, require that tag:
+
+```
+** chapter 8: The Convergence
+# MUST-BE-AFTER: lopez-turning-point
+
+Content of the chapter...
+```
+
+You can also specify that a chapter must come before another:
+
+```
+** chapter 3: Early Conflict
+# MUST-BE-BEFORE: lopez-turning-point
+
+Content of the chapter...
+```
+
+N.B. the pound signs are mandatory
+
+### Multiple Dependencies
+
+A single chapter can depend on multiple tags:
+
+```
+** chapter 12: The Finale
+# MUST-BE-AFTER: lopez-turning-point, mackenzie-revelation
+
+Content...
+```
+
+### Validation
+
+The interleave tasks will:
+- ✅ Enforce ordering: chapters with dependencies appear after their required tags
+- ✅ Detect undefined tags: error if a tag is required but never defined
+- ✅ Detect circular dependencies: error if tags form a cycle
+- ⚠️ Warn on unused tags: tags defined but never required
+
+If constraints are impossible to satisfy or invalid, the task will abort with a clear error message.
 
 ## To use on your first (writing) pass
 

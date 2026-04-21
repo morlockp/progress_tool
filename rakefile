@@ -149,7 +149,18 @@ def get_chapter_hash(config, git_hash)
       title = title_line.split(":")[1..].join(":")
       chapter_titles[unique_key] = title
 
-      chapter_done[unique_key] = word_count > $size_cutoff_chapter || !! text.match(config[:size_cuttoff_ignore_tag])
+      # allow explicit override tags
+      # backwards-compat: old misspelled ignore tag still respected
+      force_done_tag = config[:size_cutoff_force_done] || config[:size_cuttoff_ignore_tag]
+      force_done = force_done_tag && text.match?(force_done_tag)
+      force_incomplete = config[:size_cutoff_force_incomplete] && text.match?(config[:size_cutoff_force_incomplete])
+      if force_incomplete
+        chapter_done[unique_key] = false
+      elsif force_done
+        chapter_done[unique_key] = true
+      else
+        chapter_done[unique_key] = word_count > $size_cutoff_chapter
+      end
       
       chapter_file[unique_key] = file
       chapter_global_num[unique_key] = chap_num
@@ -183,6 +194,147 @@ def get_chapter_hash(config, git_hash)
   
 end
 
+desc "Show ASCII art progress graph for all target files"
+task :graph do
+
+  # Step 1: Parse all files for acts and chapters
+  file_data = {}
+  config = defined?(config) ? config : YAML.load_file(".rakefile.yaml")
+  $target_files.each do |file|
+    parsed = parse_chapters_and_acts_from_file(file, config)
+    file_data[file] = parsed
+  end
+
+  # Step 2: Build global act/chapter structure
+  global_acts = []
+  act_to_idx = {}
+  act_names = []
+  $target_files.each do |file|
+    acts = file_data[file][:acts]
+    acts.each do |act|
+      act_line = act[:line]
+      # Extract only the act number (e.g., '1' from '* Act 1: before the storm')
+      act_name = act_line[/^\*\s*Act\s*([\w\-]+)/i, 1] || act_line.gsub(/^\*\s*Act\s*/i, '').strip
+      unless act_to_idx.key?(act_line)
+        act_to_idx[act_line] = global_acts.size
+        global_acts << act_line
+        act_names << act_name
+      end
+    end
+  end
+
+  # For each act, find max number of chapters in any file for that act
+  act_chapter_max = Array.new(global_acts.size, 0)
+  $target_files.each do |file|
+    acts = file_data[file][:acts]
+    chapters = file_data[file][:chapters]
+    act_chap_map = Array.new(global_acts.size) { [] }
+    chapter_nums = chapters.keys.sort
+    acts_by_chap = acts.map { |a| a[:before_chapter] }
+    chapter_nums.each do |chap_num|
+      idx = acts_by_chap.rindex { |n| n && chap_num >= n } || 0
+      act_chap_map[idx] << chap_num
+    end
+    act_chap_map.each_with_index do |chaps, idx|
+      act_chapter_max[idx] = [act_chapter_max[idx], chaps.size].max
+    end
+  end
+
+
+  # Step 3: Calculate act paddings for header and bars
+  act_starts = [] # index in bar string where each act's vertical bar goes
+  act_widths = [] # width of each act (number of chapter chars)
+  act_bar_pads = Array.new(global_acts.size, 0)
+  pos = 0
+  global_acts.each_with_index do |act, idx|
+    act_starts << pos
+    act_widths << act_chapter_max[idx]
+    pos += act_chapter_max[idx] + 1 # +1 for the vertical bar (except last, but we handle that below)
+  end
+
+  # Remove the last +1 for the final act (no trailing bar)
+  pos -= 1
+  # Also, if any padding was added to the last bar, remove it (since no bar follows)
+  act_bar_pads[-1] = 0
+
+  # Compute minimum spacing between act names
+  min_spacing = 3
+  act_bar_pads = Array.new(global_acts.size, 0)
+  act_name_positions = [0]
+  act_names.each_with_index do |name, idx|
+    next if idx == 0
+    prev_end = act_name_positions[idx-1] + act_names[idx-1].length
+    needed = act_starts[idx] - prev_end
+    if needed < min_spacing
+      pad = min_spacing - needed
+      act_starts[idx..-1].each_with_index { |v, j| act_starts[idx+j] += pad }
+      pos += pad
+      act_bar_pads[idx-1] += pad
+    end
+    act_name_positions << act_starts[idx]
+  end
+
+  # Step 4: Build header
+  max_filename_len = $target_files.map { |f| File.basename(f).length }.max
+
+  header = ' ' * (max_filename_len + 2) # +2 for space and leftmost bar
+  act_names.each_with_index do |name, idx|
+    header = header.ljust(act_name_positions[idx] + max_filename_len + 2)
+    header[act_name_positions[idx] + max_filename_len + 2, name.length] = name
+  end
+  puts header.rstrip
+
+  # Step 5: Build output lines
+
+  lines = []
+  $target_files.each do |file|
+    parsed = file_data[file]
+    acts = parsed[:acts]
+    chapters = parsed[:chapters]
+    act_chap_map = Array.new(global_acts.size) { [] }
+    chapter_nums = chapters.keys.sort
+    acts_by_chap = acts.map { |a| a[:before_chapter] }
+    chapter_nums.each do |chap_num|
+      idx = acts_by_chap.rindex { |n| n && chap_num >= n } || 0
+      act_chap_map[idx] << chap_num
+    end
+    bar = '|'
+    global_acts.each_with_index do |act_line, idx|
+      chaps = act_chap_map[idx]
+      (0...act_chapter_max[idx]).each do |i|
+        if chaps[i]
+          chap = chapters[chaps[i]]
+          text = chap[:full_text]
+          force_done_tag = config[:size_cutoff_force_done] || config[:size_cuttoff_ignore_tag]
+          force_done = force_done_tag && text.match?(force_done_tag)
+          force_incomplete = config[:size_cutoff_force_incomplete] && text.match?(config[:size_cutoff_force_incomplete])
+          word_count = text.split.size
+          is_done = if force_incomplete
+            false
+          elsif force_done
+            true
+          else
+            word_count > $size_cutoff_chapter
+          end
+          bar << (is_done ? "=" : "-")
+        else
+          bar << " "
+        end
+      end
+      # Add vertical bar unless this is the last act
+      if idx < global_acts.size - 1
+        bar << ' ' * act_bar_pads[idx] + '|'
+      end
+    end
+    # Pad bar to match header length
+    bar = bar.ljust(pos)
+    fname = File.basename(file).ljust(max_filename_len)
+    lines << "#{fname}  #{bar}"
+  end
+
+  # Step 6: Print output
+  lines.each { |l| puts l.rstrip }
+end
 desc "create a new .rakefile.yaml"
 task :init do
   yaml_file = ".rakefile.yaml"
@@ -199,7 +351,9 @@ task :init do
 :date_start: '#{Date.today}'
 :chapter_head_tag: '** chapter'
 :size_cuttoff_chapter: 600
-:size_cuttoff_ignore_tag: 'AAA-chapter-complete'
+:size_cutoff_force_done: 'AAA-chapter-complete'
+# use the tag below to force a chapter to be marked incomplete even if it exceeds the cutoff
+# :size_cutoff_force_incomplete: 'TAG_NAME'
 STRING
               )
   end
@@ -382,6 +536,9 @@ task :default, [:git_hash] do |t, args|
   puts "  |            expansion ratio: #{sprintf('%2.2f', percent_words / percent_chapters)}"
   puts "  |            words at this ratio: #{ expansion_words.commify}"
   puts "  |            pages at this ratio: #{ (expansion_words / words_per_page).commify}"
+  puts "  |"
+  puts "  |            #{actual_words.commify} / #{expansion_words.commify} words at this ratio ( #{sprintf('%0.2f', (actual_words * 1.0 / expansion_words * 100))} % )"
+  puts "  |            #{(actual_words / words_per_page).commify} / #{(expansion_words / words_per_page).commify} pages at this ratio"
 #  puts "  | "
 #  puts "  |            #{actual_words.commify} / #{expansion_words&.commify}  words ( #{sprintf('%0.2f', (actual_words * 1.0 /expansion_words * 100))} % )"
 
@@ -520,15 +677,44 @@ task :chapters, [:git_hash] do |t, args|
   
   $target_files.each do |file|
     puts "  | #{file}"
+    
+    # Parse acts for this file to track act boundaries
+    file_data = parse_chapters_and_acts_from_file(file, config)
+    acts_by_chapter = {}
+    file_data[:acts].each do |act_info|
+      before_ch = act_info[:before_chapter]
+      act_line = act_info[:line]
+      acts_by_chapter[before_ch] = act_line
+    end
+    
+    last_act = nil
     chapter_words.each_pair do |key, words|
       next unless chapter_file[key] == file
       
+      ch_num = chapter_global_num[key]
+      
+      # Check if there's an act transition at this chapter
+      if acts_by_chapter[ch_num]
+        current_act = acts_by_chapter[ch_num]
+        # Extract act name (e.g., "Act 2-A" from "* Act 2-A")
+        if current_act =~ /\* (Act .+)/
+          current_act_name = $1
+        else
+          current_act_name = current_act
+        end
+        
+        # Print separator if act changed and it's not the first act or it's transitioning from Act 1
+        if last_act && current_act_name != last_act && current_act_name != "Act 1"
+          puts "  | --- #{current_act_name}"
+        end
+        last_act = current_act_name
+      end
+      
       sigma = std_dev == 0.0 ? 0 : ((words - avg).abs / std_dev).floor
       ch_done  = chapter_done[key] ? "✓" : " " 
-      ch_num = chapter_global_num[key]
       puts "  | #{sprintf('%3i', ch_num) }  #{ch_done} #{sprintf('%-38s', chapter_titles[key][0...38])} #{sprintf('%6s',words.commify)}    #{ sprintf('%5s',(words > avg ? "+":"-") * sigma)}     #{arrows[key] ? "<--" : ""}"
     end
-    puts "  | ---"
+    puts "  | ----------"
   end
 
   
@@ -544,13 +730,13 @@ task :chapters, [:git_hash] do |t, args|
 end
 
 task :clean do |t|
-  `rm  '##{$target_file}#' '##{$target_file}' o 2> /dev/null`
-  `rm  *~ .\#* \#*  2> /dev/null`
+  `rm -f  '##{$target_file}#' '##{$target_file}' 2> /dev/null`
+  `rm -f output.txt output.html output.docx *~ .\#* \#* 2> /dev/null`
   
   # do the globbing manually to avoid interactions between Ruby `...` and shell stuff
   # that was causing globbing not to work
   
-  system("rm", "--", *Dir.glob("#*#"))  
+  system("rm", "-f", *Dir.glob("#*#"))  
 end
 
 # task :todo do |t|
@@ -622,7 +808,7 @@ task :self_test do |t|
 end
 # Helper: parse chapters and Act lines from a single file
 # Returns hash with :chapters and :acts
-# chapters: { chapter_num => { :title, :full_text, :source_file } }
+# chapters: { chapter_num => { :title, :full_text, :source_file, :pragmas } }
 # acts: ordered array of { :line => "* Act ...", :before_chapter => chapter_num_or_nil }
 def parse_chapters_and_acts_from_file(file_path, config)
   chapter_head_tag = config[:chapter_head_tag] || "== chapter"
@@ -696,10 +882,14 @@ def parse_chapters_and_acts_from_file(file_path, config)
     # Reconstruct chapter text
     full_text = "#{chapter_head_tag}#{clean_text}"
     
+    # Parse pragmas from chapter text
+    pragmas = parse_pragmas_from_chapter_text(full_text)
+    
     chapters[chap_num] = {
       :title => title_line,
       :full_text => full_text,
-      :source_file => file_path
+      :source_file => file_path,
+      :pragmas => pragmas
     }
   end
   
@@ -717,8 +907,224 @@ def extract_source_id(filename)
   end
 end
 
+# Parse pragmas from chapter text
+# Returns hash with :defines (string or nil), :depends_on (array of strings), and :must_come_before (array of strings)
+def parse_pragmas_from_chapter_text(chapter_text)
+  defines = nil
+  depends_on = []
+  must_come_before = []
+  
+  chapter_text.each_line do |line|
+    # Look for DEFINE-TAG pragma
+    if line =~ /^\s*#\s*DEFINE-TAG:\s*(\S+)/
+      defines = $1
+    end
+    
+    # Look for MUST-BE-AFTER pragma(s) - can have multiple occurrences
+    if line =~ /^\s*#\s*MUST-BE-AFTER:\s*(.+)/
+      deps_str = $1
+      # Split by comma, strip whitespace from each
+      deps_str.split(',').each do |dep|
+        dep_tag = dep.strip
+        depends_on << dep_tag if dep_tag != ""
+      end
+    end
+    
+    # Look for MUST-BE-BEFORE pragma(s) - can have multiple occurrences
+    if line =~ /^\s*#\s*MUST-BE-BEFORE:\s*(.+)/
+      before_str = $1
+      # Split by comma, strip whitespace from each
+      before_str.split(',').each do |tag|
+        tag_name = tag.strip
+        must_come_before << tag_name if tag_name != ""
+      end
+    end
+  end
+  
+  { :defines => defines, :depends_on => depends_on, :must_come_before => must_come_before }
+end
+
+# Build global pragma registry from all files
+# Returns hash with validation status and mappings
+def build_pragma_registry(all_data, all_files)
+  tag_definitions = {}        # tag_name => "file:chapter_num"
+  chapter_dependencies = {}   # "file:chapter_num" => [tag1, tag2, ...] (MUST-BE-AFTER)
+  chapter_must_come_before = {} # "file:chapter_num" => [tag1, tag2, ...] (MUST-BE-BEFORE)
+  undefined_tags = Set.new
+  unused_tags = Set.new
+  circular_deps = []
+  
+  # First pass: collect all DEFINE-TAG pragmas
+  all_files.each do |file|
+    next unless all_data[file]
+    
+    all_data[file][:chapters].each do |local_ch_num, chapter_data|
+      pragmas = chapter_data[:pragmas] || { :defines => nil, :depends_on => [] }
+      
+      if pragmas[:defines]
+        tag_name = pragmas[:defines]
+        chapter_id = "#{file}:#{local_ch_num}"
+        
+        if tag_definitions[tag_name]
+          # Tag redefined - warn or error
+          abort "*** ERROR: Tag '#{tag_name}' defined multiple times: in #{tag_definitions[tag_name]} and #{chapter_id}"
+        end
+        
+        tag_definitions[tag_name] = chapter_id
+        unused_tags.add(tag_name)  # Start with all tags as unused; we'll mark them used below
+      end
+    end
+  end
+  
+  # Second pass: collect all MUST-BE-AFTER and MUST-BE-BEFORE dependencies and mark tags as used
+  all_files.each do |file|
+    next unless all_data[file]
+    
+    all_data[file][:chapters].each do |local_ch_num, chapter_data|
+      pragmas = chapter_data[:pragmas] || { :defines => nil, :depends_on => [], :must_come_before => [] }
+      
+      chapter_id = "#{file}:#{local_ch_num}"
+      
+      # Handle MUST-BE-AFTER dependencies
+      if pragmas[:depends_on].size > 0
+        chapter_dependencies[chapter_id] = pragmas[:depends_on].dup
+        
+        # Check for undefined tags and mark defined tags as used
+        pragmas[:depends_on].each do |tag|
+          if tag_definitions[tag]
+            unused_tags.delete(tag)
+          else
+            undefined_tags.add(tag)
+          end
+        end
+      end
+      
+      # Handle MUST-BE-BEFORE dependencies
+      if pragmas[:must_come_before].size > 0
+        chapter_must_come_before[chapter_id] = pragmas[:must_come_before].dup
+        
+        # Check for undefined tags and mark defined tags as used
+        pragmas[:must_come_before].each do |tag|
+          if tag_definitions[tag]
+            unused_tags.delete(tag)
+          else
+            undefined_tags.add(tag)
+          end
+        end
+      end
+    end
+  end
+  
+  # Detect circular dependencies using DFS
+  visited = Set.new
+  rec_stack = Set.new
+  
+  def has_cycle_dfs(chapter_id, graph, visited, rec_stack, tag_definitions)
+    visited.add(chapter_id)
+    rec_stack.add(chapter_id)
+    
+    deps = graph[chapter_id] || []
+    deps.each do |tag|
+      dep_chapter_id = tag_definitions[tag]
+      next unless dep_chapter_id  # Skip undefined tags (already recorded)
+      
+      if !visited.include?(dep_chapter_id)
+        if has_cycle_dfs(dep_chapter_id, graph, visited, rec_stack, tag_definitions)
+          return true
+        end
+      elsif rec_stack.include?(dep_chapter_id)
+        # Found a cycle
+        return true
+      end
+    end
+    
+    rec_stack.delete(chapter_id)
+    false
+  end
+  
+  chapter_dependencies.keys.each do |chapter_id|
+    if !visited.include?(chapter_id)
+      if has_cycle_dfs(chapter_id, chapter_dependencies, visited, rec_stack, tag_definitions)
+        circular_deps << chapter_id
+      end
+    end
+  end
+  
+  {
+    :tag_definitions => tag_definitions,
+    :chapter_dependencies => chapter_dependencies,
+    :chapter_must_come_before => chapter_must_come_before,
+    :undefined_tags => undefined_tags.to_a,
+    :unused_tags => unused_tags.to_a,
+    :circular_deps => circular_deps
+  }
+end
+
+# Perform topological sort on chapters respecting pragma dependencies
+# Returns ordered array of chapter IDs ("file:local_ch_num")
+def topological_sort_chapters(chapter_dependencies, chapter_must_come_before, tag_definitions, all_chapters_by_id)
+  # Build in-degree map and adjacency list for topological sort
+  in_degree = {}
+  adjacency = {}
+  
+  all_chapters_by_id.each do |chapter_id|
+    in_degree[chapter_id] = 0
+    adjacency[chapter_id] = []
+  end
+  
+  # Handle MUST-BE-AFTER dependencies (this chapter depends on tagged chapters)
+  chapter_dependencies.each do |chapter_id, dep_tags|
+    dep_tags.each do |tag|
+      dep_chapter_id = tag_definitions[tag]
+      next unless dep_chapter_id
+      
+      # dep_chapter_id must come before chapter_id
+      adjacency[dep_chapter_id] ||= []
+      adjacency[dep_chapter_id] << chapter_id
+      in_degree[chapter_id] = (in_degree[chapter_id] || 0) + 1
+    end
+  end
+  
+  # Handle MUST-BE-BEFORE dependencies (tagged chapters depend on this chapter)
+  chapter_must_come_before.each do |chapter_id, before_tags|
+    before_tags.each do |tag|
+      before_chapter_id = tag_definitions[tag]
+      next unless before_chapter_id
+      
+      # chapter_id must come before before_chapter_id
+      adjacency[chapter_id] ||= []
+      adjacency[chapter_id] << before_chapter_id
+      in_degree[before_chapter_id] = (in_degree[before_chapter_id] || 0) + 1
+    end
+  end
+  
+  # Kahn's algorithm for topological sort
+  queue = []
+  in_degree.each do |chapter_id, degree|
+    queue << chapter_id if degree == 0
+  end
+  
+  sorted = []
+  while queue.size > 0
+    current = queue.shift
+    sorted << current
+    
+    (adjacency[current] || []).each do |neighbor|
+      in_degree[neighbor] -= 1
+      queue << neighbor if in_degree[neighbor] == 0
+    end
+  end
+  
+  # Check if all chapters were sorted (if not, there's a cycle we missed)
+  if sorted.size != all_chapters_by_id.size
+    abort "*** ERROR: Topological sort failed - cycle detected in pragma dependencies"
+  end
+  
+  sorted
+end
+
 # Shared function to parse all chapters and Acts, and validate structure
-def build_interleaved_data(all_data, all_acts, max_chapter)
+def build_interleaved_data(all_data, all_acts, max_chapter, pragma_registry = nil)
   # Validate that Act lines are identical across all files (up to the minimum count)
   # It is acceptable for one file to have fewer Acts at the end than another
   if all_acts.values.length > 1
@@ -742,56 +1148,163 @@ def build_interleaved_data(all_data, all_acts, max_chapter)
   reference_file = $target_files[0]
   reference_acts = all_acts[reference_file]
   
+  # Build list of all chapters in "file:chapter_num" format
+  all_chapters = []
+  (1..max_chapter).each do |local_ch_num|
+    $target_files.each do |file|
+      if all_data[file][:chapters][local_ch_num]
+        all_chapters << "#{file}:#{local_ch_num}"
+      end
+    end
+  end
+  
+  # If pragmas are provided, sort chapters by topological order
+  # Otherwise, use the natural sequential order
+  if pragma_registry && (pragma_registry[:chapter_dependencies].size > 0 || pragma_registry[:chapter_must_come_before].size > 0)
+    sorted_chapters = topological_sort_chapters(
+      pragma_registry[:chapter_dependencies],
+      pragma_registry[:chapter_must_come_before],
+      pragma_registry[:tag_definitions],
+      all_chapters
+    )
+  else
+    sorted_chapters = all_chapters
+  end
+  
   # Build a mapping: for each reference file local chapter, which sequential chapter number is it?
   # This helps us know when to output Acts from the reference file
   ref_local_to_sequential = {}
   sequential_chapter_num = 0
   
-  (1..max_chapter).each do |local_ch_num|
-    $target_files.each do |file|
-      if all_data[file][:chapters][local_ch_num]
-        sequential_chapter_num += 1
-        # Record the sequential chapter number when we encounter a chapter from the reference file
-        if file == reference_file
-          ref_local_to_sequential[local_ch_num] = sequential_chapter_num
+  sorted_chapters.each do |chapter_id|
+    file, local_ch_num_str = chapter_id.split(':')
+    local_ch_num = local_ch_num_str.to_i
+    sequential_chapter_num += 1
+    # Record the sequential chapter number when we encounter a chapter from the reference file
+    if file == reference_file
+      ref_local_to_sequential[local_ch_num] = sequential_chapter_num
+    end
+  end
+  
+  # Build interleaved structure with pragmas-respecting chapter order
+  # Output Acts when we reach the corresponding chapter from the reference file
+  interleaved = []
+  sequential_chapter_num = 0
+  last_reference_chapter = nil
+
+  sorted_chapters.each do |chapter_id|
+    file, local_ch_num_str = chapter_id.split(':')
+    local_ch_num = local_ch_num_str.to_i
+    
+    # Before outputting the first chapter from the reference file at a given local chapter number,
+    # check if any Acts should appear (only if chapter number is different from last time)
+    if file == reference_file && last_reference_chapter != local_ch_num
+      reference_acts.each do |act_data|
+        if act_data[:before_chapter] == local_ch_num
+          interleaved << { :type => :act, :line => act_data[:line] }
+        end
+      end
+      last_reference_chapter = local_ch_num
+    end
+    
+    sequential_chapter_num += 1
+    chapter_data = all_data[file][:chapters][local_ch_num]
+    source_id = extract_source_id(file)
+
+    # Augment the chapter header with source identifier and renumber to sequential
+    augmented_text = chapter_data[:full_text]
+    augmented_text.sub!(/(\*\* chapter )\d+(:)/, "\\1#{sequential_chapter_num}\\2")
+    augmented_text.sub!(/(\*\* chapter \d+:)/, "\\1 #{source_id}")
+
+    interleaved << { :type => :chapter, :text => augmented_text, :chapter_id => chapter_id, :sequential_num => sequential_chapter_num }
+  end
+
+  interleaved
+end
+
+# Validate pragma constraints in the interleaved output
+# Reports each constraint and whether it was satisfied
+def validate_pragma_constraints_in_output(interleaved, pragma_registry, all_data, target_files)
+  # Build mapping: chapter_id => sequential_number in output
+  chapter_positions = {}
+  interleaved.each do |item|
+    if item[:type] == :chapter && item[:chapter_id]
+      chapter_positions[item[:chapter_id]] = item[:sequential_num]
+    end
+  end
+
+  failures = []
+  
+  # Check all pragmas
+  target_files.each do |file|
+    all_data[file][:chapters].each do |local_ch_num, chapter_data|
+      pragmas = chapter_data[:pragmas] || { :defines => nil, :depends_on => [] }
+      chapter_id = "#{file}:#{local_ch_num}"
+      seq_num = chapter_positions[chapter_id]
+      
+      next unless seq_num  # Chapter not in output
+      
+      # Report DEFINE-TAG pragmas
+      if pragmas[:defines]
+        puts "  * chapter #{seq_num}: tag '#{pragmas[:defines]}' ; defined"
+      end
+      
+      # Check MUST-BE-AFTER constraints
+      pragmas[:depends_on].each do |tag|
+        dep_chapter_id = pragma_registry[:tag_definitions][tag]
+        
+        unless dep_chapter_id
+          # Tag undefined - already reported earlier
+          next
+        end
+        
+        dep_seq_num = chapter_positions[dep_chapter_id]
+        
+        if dep_seq_num && dep_seq_num < seq_num
+          puts "  * chapter #{seq_num}: MUST-BE-AFTER '#{tag}' - ✓ satisfied (#{tag} at chapter #{dep_seq_num})"
+        else
+          puts "  * chapter #{seq_num}: MUST-BE-AFTER '#{tag}' - ✗ FAILED (#{tag} not before this chapter)"
+          failures << "Chapter #{seq_num} depends on '#{tag}' but it's not positioned before it"
+        end
+      end
+      
+      # Check MUST-BE-BEFORE constraints
+      (pragmas[:must_come_before] || []).each do |tag|
+        before_chapter_id = pragma_registry[:tag_definitions][tag]
+        
+        unless before_chapter_id
+          # Tag undefined - already reported earlier
+          next
+        end
+        
+        before_seq_num = chapter_positions[before_chapter_id]
+        
+        if before_seq_num && seq_num < before_seq_num
+          puts "  * chapter #{seq_num}: MUST-BE-BEFORE '#{tag}' - ✓ satisfied (#{tag} at chapter #{before_seq_num})"
+        else
+          puts "  * chapter #{seq_num}: MUST-BE-BEFORE '#{tag}' - ✗ FAILED (#{tag} not after this chapter)"
+          failures << "Chapter #{seq_num} must come before '#{tag}' but it's not positioned before it"
         end
       end
     end
   end
   
-  # Build interleaved structure with sequential chapter numbering
-  # Output Acts when we reach the corresponding chapter from the reference file
-  interleaved = []
-  sequential_chapter_num = 0
-
-  (1..max_chapter).each do |local_ch_num|
-    $target_files.each do |file|
-      if all_data[file][:chapters][local_ch_num]
-        # Before outputting the first chapter from the reference file at this local chapter number,
-        # check if any Acts should appear
-        if file == reference_file
-          reference_acts.each do |act_data|
-            if act_data[:before_chapter] == local_ch_num
-              interleaved << { :type => :act, :line => act_data[:line] }
-            end
-          end
-        end
-        
-        sequential_chapter_num += 1
-        chapter_data = all_data[file][:chapters][local_ch_num]
-        source_id = extract_source_id(file)
-
-        # Augment the chapter header with source identifier and renumber to sequential
-        augmented_text = chapter_data[:full_text]
-        augmented_text.sub!(/(\*\* chapter )\d+(:)/, "\\1#{sequential_chapter_num}\\2")
-        augmented_text.sub!(/(\*\* chapter \d+:)/, "\\1 #{source_id}")
-
-        interleaved << { :type => :chapter, :text => augmented_text }
-      end
-    end
+  if failures.size > 0
+    puts ""
+    puts "  *** CONSTRAINT VIOLATIONS DETECTED ***"
+    failures.each { |f| puts "  *** #{f}" }
+    abort "Pragma constraints not satisfied in output"
   end
 
-  interleaved
+  # Warn about unused tags (defined but never referenced)
+  if pragma_registry[:unused_tags] && !pragma_registry[:unused_tags].empty?
+    puts ""
+    puts "  *** WARNING: The following tags are defined but never referenced in any MUST-BE-AFTER or MUST-BE-BEFORE pragma:"
+    pragma_registry[:unused_tags].each do |tag|
+      chapter_id = pragma_registry[:tag_definitions][tag]
+      puts "    - tag '#{tag}' defined in #{chapter_id}"
+    end
+  end
 end
 
 # Process underscores for italics, converting _text_ to <i>text</i>
@@ -853,16 +1366,22 @@ def process_italics_for_html(text)
   result
 end
 
+## Helper: Remove arrows like <==, <===, <====, etc. from text
+def remove_arrows(text)
+  # Remove any arrows like <==, <===, <====, etc. at the start of lines or inline
+  text.gsub(/<={2,}/, "")
+end
+
 # Format interleaved data as plain text
 def format_interleaved_as_text(interleaved)
   output_lines = []
 
   interleaved.each do |item|
     if item[:type] == :act
-      output_lines << item[:line]
+      output_lines << remove_arrows(item[:line])
       output_lines << ""
     elsif item[:type] == :chapter
-      output_lines << item[:text]
+      output_lines << remove_arrows(item[:text])
       output_lines << ""
     end
   end
@@ -878,12 +1397,13 @@ def format_interleaved_as_html(interleaved)
     if item[:type] == :act
       # Remove leading asterisks from act line: "* Act 1: ..." -> "<h1>Act 1: ...</h1>"
       act_text = item[:line].sub(/^\*\s*/, "")
+      act_text = remove_arrows(act_text)
       # Process italics in act text
       act_text = process_italics_for_html(act_text)
       html_parts << "<h1>#{act_text}</h1>"
     elsif item[:type] == :chapter
       # Parse chapter header and content
-      lines = item[:text].split("\n")
+      lines = remove_arrows(item[:text]).split("\n")
       # First line is the chapter header (with ** removed)
       chapter_header = lines[0].sub(/^\*\*\s*/, "")
       # Process italics in chapter header
@@ -891,14 +1411,11 @@ def format_interleaved_as_html(interleaved)
       html_parts << "<h2>#{chapter_header}</h2>"
       
       # Remaining lines are chapter content
-      # Split by double newlines to create separate paragraphs
       content_lines = lines[1..-1] || []
       content_text = content_lines.join("\n").strip
-      
       if content_text.length > 0
         # Split by double newlines to identify paragraphs
         paragraphs = content_text.split(/\n\s*\n/).map(&:strip).reject(&:empty?)
-        
         paragraphs.each do |para|
           # Process italics in each paragraph and replace single newlines with spaces
           para_text = para.gsub(/\n/, " ").strip
@@ -929,7 +1446,23 @@ task :interleave_txt do
     abort "No chapters found in any source files"
   end
 
-  interleaved = build_interleaved_data(all_data, all_acts, max_chapter)
+  # Build pragma registry and validate
+  pragma_registry = build_pragma_registry(all_data, $target_files)
+  
+  # Report validation errors
+  if pragma_registry[:undefined_tags].size > 0
+    puts "*** WARNING: Undefined pragma tags: #{pragma_registry[:undefined_tags].join(', ')}"
+  end
+  
+  if pragma_registry[:unused_tags].size > 0
+    puts "*** WARNING: Unused pragma tags: #{pragma_registry[:unused_tags].join(', ')}"
+  end
+  
+  if pragma_registry[:circular_deps].size > 0
+    abort "*** ERROR: Circular dependencies detected in pragmas: #{pragma_registry[:circular_deps].join(', ')}"
+  end
+
+  interleaved = build_interleaved_data(all_data, all_acts, max_chapter, pragma_registry)
   output_text = format_interleaved_as_text(interleaved)
 
   File.open("output.txt", "w") do |f|
@@ -939,6 +1472,13 @@ task :interleave_txt do
   puts "Wrote interleaved chapters to output.txt"
   puts "  Max chapter number: #{max_chapter}"
   puts "  Source files: #{$target_files.join(', ')}"
+  
+  # Validate pragma constraints in the output
+  if pragma_registry[:chapter_dependencies].size > 0 || pragma_registry[:chapter_must_come_before].size > 0 || pragma_registry[:tag_definitions].size > 0
+    puts ""
+    puts "Pragma constraint verification:"
+    validate_pragma_constraints_in_output(interleaved, pragma_registry, all_data, $target_files)
+  end
 end
 
 # Helper function to convert HTML to DOCX using Pandoc
@@ -971,7 +1511,23 @@ task :interleave_html do
     abort "No chapters found in any source files"
   end
 
-  interleaved = build_interleaved_data(all_data, all_acts, max_chapter)
+  # Build pragma registry and validate
+  pragma_registry = build_pragma_registry(all_data, $target_files)
+  
+  # Report validation errors
+  if pragma_registry[:undefined_tags].size > 0
+    puts "*** WARNING: Undefined pragma tags: #{pragma_registry[:undefined_tags].join(', ')}"
+  end
+  
+  if pragma_registry[:unused_tags].size > 0
+    puts "*** WARNING: Unused pragma tags: #{pragma_registry[:unused_tags].join(', ')}"
+  end
+  
+  if pragma_registry[:circular_deps].size > 0
+    abort "*** ERROR: Circular dependencies detected in pragmas: #{pragma_registry[:circular_deps].join(', ')}"
+  end
+
+  interleaved = build_interleaved_data(all_data, all_acts, max_chapter, pragma_registry)
   output_html = format_interleaved_as_html(interleaved)
 
   File.open("output.html", "w") do |f|
@@ -981,6 +1537,13 @@ task :interleave_html do
   puts "Wrote interleaved chapters to output.html"
   puts "  Max chapter number: #{max_chapter}"
   puts "  Source files: #{$target_files.join(', ')}"
+  
+  # Validate pragma constraints in the output
+  if pragma_registry[:chapter_dependencies].size > 0 || pragma_registry[:chapter_must_come_before].size > 0 || pragma_registry[:tag_definitions].size > 0
+    puts ""
+    puts "Pragma constraint verification:"
+    validate_pragma_constraints_in_output(interleaved, pragma_registry, all_data, $target_files)
+  end
 end
 
 # Helper function to convert HTML to DOCX using LibreOffice
@@ -1034,7 +1597,23 @@ task :interleave_doc do
     abort "No chapters found in any source files"
   end
 
-  interleaved = build_interleaved_data(all_data, all_acts, max_chapter)
+  # Build pragma registry and validate
+  pragma_registry = build_pragma_registry(all_data, $target_files)
+  
+  # Report validation errors
+  if pragma_registry[:undefined_tags].size > 0
+    puts "*** WARNING: Undefined pragma tags: #{pragma_registry[:undefined_tags].join(', ')}"
+  end
+  
+  if pragma_registry[:unused_tags].size > 0
+    puts "*** WARNING: Unused pragma tags: #{pragma_registry[:unused_tags].join(', ')}"
+  end
+  
+  if pragma_registry[:circular_deps].size > 0
+    abort "*** ERROR: Circular dependencies detected in pragmas: #{pragma_registry[:circular_deps].join(', ')}"
+  end
+
+  interleaved = build_interleaved_data(all_data, all_acts, max_chapter, pragma_registry)
   output_html = format_interleaved_as_html(interleaved)
 
   # Write HTML to temporary file
@@ -1052,4 +1631,19 @@ task :interleave_doc do
   puts "Converted to #{docx_file}"
   puts "  Max chapter number: #{max_chapter}"
   puts "  Source files: #{$target_files.join(', ')}"
+  
+  # Validate pragma constraints in the output
+  if pragma_registry[:chapter_dependencies].size > 0 || pragma_registry[:chapter_must_come_before].size > 0 || pragma_registry[:tag_definitions].size > 0
+    puts ""
+    puts "Pragma constraint verification:"
+    validate_pragma_constraints_in_output(interleaved, pragma_registry, all_data, $target_files)
+  end
 end
+
+# Alias: interleave_text does the same as interleave_txt
+task :interleave_text => :interleave_txt
+
+# Short aliases for interleave tasks
+task :it => :interleave_text
+task :ih => :interleave_html
+task :id => :interleave_doc
