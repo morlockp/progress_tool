@@ -215,17 +215,10 @@ task :graph do
     puts "  | "
   end
 
-  # Print progress summary at the top
+  # Print the book title and a blank line before the ASCII art graph
   config = defined?(config) ? config : YAML.load_file(".rakefile.yaml")
-  cat_str = get_target_content($target_files)
-  actual_words = cat_str.split.size
-  percent_words = ($target_words && $target_words > 0) ? (actual_words * 1.0 / $target_words) : 0.0
-  ch_hash = get_chapter_hash(config, nil)
-  actual_chapters = ch_hash[:done]
-  target_chapters = ch_hash[:done] + ch_hash[:notdone]
-  percent_chapters = (target_chapters > 0) ? (actual_chapters * 1.0 / target_chapters) : 0.0
-  expansion_words = ($target_words * percent_words / percent_chapters).floor rescue 0
-  print_progress_summary($title, actual_words, $target_words, $words_per_page, actual_chapters, target_chapters, percent_words, percent_chapters, expansion_words)
+  puts config[:title] || config["title"]
+  puts
 
   # Step 1: Parse all files for acts and chapters
   file_data = {}
@@ -244,9 +237,9 @@ task :graph do
       act_line = act[:line]
       # Extract only the act number (e.g., '1' from '* Act 1: before the storm')
       act_name = act_line[/^\*\s*Act\s*([\w\-]+)/i, 1] || act_line.gsub(/^\*\s*Act\s*/i, '').strip
-      unless act_to_idx.key?(act_line)
-        act_to_idx[act_line] = global_acts.size
-        global_acts << act_line
+      unless act_to_idx.key?(act_name)
+        act_to_idx[act_name] = global_acts.size
+        global_acts << act_line # Keep the first full act_line for display
         act_names << act_name
       end
     end
@@ -259,10 +252,19 @@ task :graph do
     chapters = file_data[file][:chapters]
     act_chap_map = Array.new(global_acts.size) { [] }
     chapter_nums = chapters.keys.sort
+    # Map act_name to its index for deduplication
+    act_name_to_idx = {}
+    global_acts.each_with_index do |act_line, idx|
+      act_name = act_line[/^\*\s*Act\s*([\w\-]+)/i, 1] || act_line.gsub(/^\*\s*Act\s*/i, '').strip
+      act_name_to_idx[act_name] = idx
+    end
     acts_by_chap = acts.map { |a| a[:before_chapter] }
+    acts_names = acts.map { |a| (a[:line][/^\*\s*Act\s*([\w\-]+)/i, 1] || a[:line].gsub(/^\*\s*Act\s*/i, '').strip) }
     chapter_nums.each do |chap_num|
       idx = acts_by_chap.rindex { |n| n && chap_num >= n } || 0
-      act_chap_map[idx] << chap_num
+      act_name = acts_names[idx]
+      global_idx = act_name_to_idx[act_name]
+      act_chap_map[global_idx] << chap_num
     end
     act_chap_map.each_with_index do |chaps, idx|
       act_chapter_max[idx] = [act_chapter_max[idx], chaps.size].max
@@ -585,7 +587,7 @@ end
     target_chapters = ch_hash[:done] + ch_hash[:notdone]
     percent_chapters = (target_chapters > 0) ? (actual_chapters * 1.0 / target_chapters) : 0.0
     expansion_words = ($target_words * percent_words / percent_chapters).floor rescue 0
-    print_progress_summary($title, actual_words, $target_words, words_per_page, actual_chapters, target_chapters, percent_words, percent_chapters, expansion_words)
+    print_progress_summary($title, actual_words, $target_words, $words_per_page, actual_chapters, target_chapters, percent_words, percent_chapters, expansion_words)
   
   # draft 2 - use the '<---' flag
   if revised_words > 0
