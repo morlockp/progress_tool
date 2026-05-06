@@ -55,9 +55,14 @@ $target_file = $target_files[0]  # for backward compatibility
 
 title = config[:title]
 target_words = config[:target_words]
+
 # expose these to helper methods as globals so task methods can access them
 $target_words = target_words
 $title = title
+
+# Parse book_split from config (if present)
+book_split = config[:book_split] || config["book_split"]
+
 
 date_start        = Date.parse(config[:date_start])
 
@@ -403,95 +408,268 @@ end
 desc "generate stats - optionally from a git hash with `rake default[<hashID>]`"
 task :default, [:git_hash] do |t, args|
 
-  verbose = false
+  # --- BOOK SPLIT ANALYSIS LOGIC ---
+  all_data = {}
+  all_acts = {}
+  max_chapter = 0
 
-  # setup: figure out how to get the text of target version and previous version 
-  #
-  cat_str = get_target_content($target_files, args[:git_hash])
-
-  cat_prev_str = if args[:git_hash]
-                    get_target_content($target_files, "#{args[:git_hash]}^1")
-                  else
-                    # Get previous version from git
-                    content = ""
-                    $target_files.each do |file|
-                      content += `git show HEAD:#{file}`
-                    end
-                    content
-                  end
-
-
-
-  
-  # XXX maybe rewrite this function to use 'cat_str' ???
-  #
-  ret = get_chapter_hash(config, args[:git_hash])
-  actual_chapters = ret[:done]
-  target_chapters   = ret[:done] + ret[:notdone]
-
-  
-  actual_words = cat_str.split.size
-  
-  
-  to_go_words = target_words - actual_words
-
-  percent_words    =  actual_words * 1.0 / target_words
-  percent_chapters =  actual_chapters * 1.0 / target_chapters
-
-  # date and rate
-  #
-  days_since_start = [(Date.today - date_start).to_i + 1, 1].max
-  write_rate       = [(actual_words / days_since_start ).to_i, 1].max
-  to_go_days       = to_go_words / write_rate
-
-
-
-  
-  xxx_count_now = cat_str.scan(/XXX/).size
-  yyy_count_now = cat_str.scan(/YYY/).size
-  zzz_count_now = cat_str.scan(/ZZZ/).size
-
-
-  xxx_count_prev = cat_prev_str.scan(/XXX/).size
-
-  yyy_count_prev = cat_prev_str.scan(/YYY/).size
-  zzz_count_prev = cat_prev_str.scan(/ZZZ/).size
-
-  xxx_diff = xxx_count_now - xxx_count_prev
-  yyy_diff = yyy_count_now - yyy_count_prev
-  zzz_diff = yyy_count_now - yyy_count_prev
-
-  xxx_diff_str = "#{xxx_diff >= 0 ? "+" : ""}#{xxx_diff}"
-  yyy_diff_str = "#{yyy_diff >= 0 ? "+" : ""}#{yyy_diff}"
-  zzz_diff_str = "#{yyy_diff >= 0 ? "+" : ""}#{zzz_diff}"
-  
-
-
-  if verbose 
-    puts "cat_str = #{cat_str}"
-    puts "----"
-    puts "cat_prev_str = #{cat_prev_str}"
-    puts "----"
-    
-    puts "xxx_count_now = #{xxx_count_now}"
-    puts "yyy_count_now = #{yyy_count_now}"
-    puts "zzz_count_now = #{zzz_count_now}"
-    
-    puts "xxx_count_prev = #{xxx_count_prev}"
-    puts "yyy_count_prev = #{yyy_count_prev}"
-    puts "zzz_count_prev = #{zzz_count_prev}"
-
+  $target_files.each do |file|
+    data = parse_chapters_and_acts_from_file(file, config)
+    all_data[file] = data
+    all_acts[file] = data[:acts]
+    max_chapter = [max_chapter, data[:chapters].keys.max || 0].max
   end
-  
-  # XXX rewrite this to use "cat_str" and "cat_prev_str"
-  #
 
-  # the '--text' flag to grep forces grep to consider input as text.  This
-  # is useful in case the file somehow has a non ASCII character, and the git diff 
-  # would  merely say "binary files match / don't match"
-  # and then grep would not see any \+ or \- in the output
-  # and thus report "0 words added / deleted"
-  #
+  if max_chapter == 0
+    abort "No chapters found in any source files"
+  end
+
+  book_split = config[:book_split] || config["book_split"]
+  if book_split
+    book_split = book_split.transform_keys(&:to_s)
+    book_to_acts = {}
+    book_split.each do |book, acts|
+      book_to_acts[book] = acts.map(&:to_s)
+    end
+
+    # Gather all act names in all input files (in order of appearance)
+    all_act_names = []
+    $target_files.each do |file|
+      all_acts[file].each do |act|
+        act_name = act[:line][/^\*\s*Act\s*([\w\-]+)/i, 1] || act[:line].gsub(/^\*\s*Act\s*/i, '').strip
+        all_act_names << act_name unless all_act_names.include?(act_name)
+      end
+    end
+
+    # Validation: every act must be assigned to exactly one book
+    act_to_books = Hash.new { |h, k| h[k] = [] }
+    book_to_acts.each do |book, acts|
+      acts.each { |act| act_to_books[act] << book }
+    end
+    missing_acts = all_act_names.uniq - act_to_books.keys
+    unless missing_acts.empty?
+      abort "*** ERROR: The following acts are not assigned to any book in book_split: #{missing_acts.join(', ')}"
+    end
+    multi_books = act_to_books.select { |act, books| books.size > 1 }
+    unless multi_books.empty?
+      msg = multi_books.map { |act, books| "Act '#{act}' assigned to multiple books: #{books.join(', ')}" }.join("\n  ")
+      abort "*** ERROR: The following acts are assigned to multiple books in book_split:\n  #{msg}"
+    end
+
+    selected_books = if ENV['BOOK']
+      [ENV['BOOK'].to_s]
+    else
+      book_to_acts.keys
+    end
+
+    selected_books.each do |book|
+      acts_for_book = book_to_acts[book]
+      # Filter acts and chapters for this book
+      filtered_all_data = {}
+      filtered_all_acts = {}
+      filtered_target_files = []
+      $target_files.each do |file|
+        acts = all_acts[file].select do |act|
+          act_name = act[:line][/^\*\s*Act\s*([\w\-]+)/i, 1] || act[:line].gsub(/^\*\s*Act\s*/i, '').strip
+          acts_for_book.include?(act_name)
+        end
+        next if acts.empty?
+        filtered_all_acts[file] = acts
+        # Filter chapters to only those belonging to the selected acts
+        chapters = all_data[file][:chapters].select do |chap_num, chap_data|
+          # Find which act this chapter belongs to
+          act_idx = all_acts[file].rindex { |a| a[:before_chapter] && chap_num >= a[:before_chapter] }
+          if act_idx
+            act_name = all_acts[file][act_idx][:line][/^\*\s*Act\s*([\w\-]+)/i, 1] || all_acts[file][act_idx][:line].gsub(/^\*\s*Act\s*/i, '').strip
+            acts_for_book.include?(act_name)
+          else
+            false
+          end
+        end
+        filtered_all_data[file] = all_data[file].merge(:acts => acts, :chapters => chapters)
+        filtered_target_files << file
+      end
+
+      # Compute stats for this book (only from acts present in this book)
+      actual_words = 0
+      done_chapters = 0
+      total_chapters = 0
+      filtered_all_data.each do |file, data|
+        data[:chapters].each do |chap_num, chap_data|
+          text = chap_data[:full_text]
+          word_count = text.split.size
+          actual_words += word_count
+          total_chapters += 1
+          force_done_tag = config[:size_cutoff_force_done] || config[:size_cuttoff_ignore_tag]
+          force_done = force_done_tag && text.match?(force_done_tag)
+          force_incomplete = config[:size_cutoff_force_incomplete] && text.match?(config[:size_cutoff_force_incomplete])
+          is_done = if force_incomplete
+            false
+          elsif force_done
+            true
+          else
+            word_count > $size_cutoff_chapter
+          end
+          done_chapters += 1 if is_done
+        end
+      end
+      actual_chapters = done_chapters
+      target_chapters = total_chapters
+      percent_words = ($target_words && $target_words > 0) ? (actual_words * 1.0 / $target_words) : 0.0
+      percent_chapters = (target_chapters > 0) ? (actual_chapters * 1.0 / target_chapters) : 0.0
+      expansion_words = ($target_words * percent_words / (percent_chapters.nonzero? || 1)).floor rescue 0
+
+      # Compute words added/removed for this book (git diff), only for chapters in acts for this book
+      words_minus = 0
+      words_plus = 0
+      filtered_target_files.each do |file|
+        # Get the set of chapter numbers for this file and book
+        book_chapnums = filtered_all_data[file][:chapters].keys
+        chapter_head_tag = config[:chapter_head_tag] || "== chapter"
+        # Use -U999999 to get all context lines, so chapter headings are always present
+        diff_lines = `git diff -U999999 #{args[:git_hash]} #{file}`.lines
+        current_chapnum = nil
+        diff_lines.each do |line|
+          # Detect chapter heading in context
+          if line.match?(/^[- +]*#{Regexp.escape(chapter_head_tag)}.*?(\d+)/)
+            current_chapnum = $1.to_i rescue nil
+          end
+          # Only count words for chapters in this book
+          if (line.start_with?("-") || line.start_with?("+")) && book_chapnums.include?(current_chapnum)
+            if line.start_with?("-")
+              words_minus += line[1..-1].split.size
+            elsif line.start_with?("+")
+              words_plus += line[1..-1].split.size
+            end
+          end
+        end
+      end
+      words_delta = words_plus - words_minus
+
+      puts ""
+      puts "+--------------------"
+      puts "| #{book}"
+      puts "|"
+      puts "| story :    #{actual_words.commify} / #{$target_words&.commify}  words ( #{sprintf('%0.2f', percent_words * 100)} % )"
+      puts "|            #{actual_words / $words_per_page} / #{$target_words / $words_per_page}  pages"
+      puts "|            #{actual_chapters} / #{target_chapters} chapters ( #{sprintf('%0.2f', percent_chapters * 100)} % )"
+      puts "| "
+      puts "|            expansion ratio: #{sprintf('%2.2f', percent_words / (percent_chapters.nonzero? || 1))}"
+      puts "|            words at this ratio: #{ expansion_words.commify}"
+      puts "|            pages at this ratio: #{ (expansion_words / $words_per_page).commify}"
+      puts "|"
+      puts "|            #{actual_words.commify} / #{expansion_words.commify} words at this ratio ( #{sprintf('%0.2f', (actual_words * 1.0 / (expansion_words.nonzero? || 1) * 100))} % )"
+      puts "|            #{(actual_words / $words_per_page).commify} / #{(expansion_words / $words_per_page).commify} pages at this ratio"
+      puts "| "
+      puts "|            today's word delta: #{words_delta > 0 ? "+" : ""}#{words_delta.commify}   (+#{words_plus.commify} -#{words_minus.commify})"
+      puts "| "
+
+      # ASCII art progress graph for this book
+      # --- ASCII ART BARGRAPH: only show acts present in this book ---
+      # Build act/chapter structure for acts present in this book only
+      act_to_idx = {}
+      act_names = []
+      act_to_chapnums = Hash.new { |h, k| h[k] = Set.new }
+      filtered_all_acts.values.each do |acts|
+        acts.each do |act|
+          act_line = act[:line]
+          act_name = act_line[/^\*\s*Act\s*([\w\-]+)/i, 1] || act_line.gsub(/^\*\s*Act\s*/i, '').strip
+          unless act_to_idx.key?(act_name)
+            act_to_idx[act_name] = act_names.size
+            act_names << act_name
+          end
+        end
+      end
+      filtered_all_data.each do |file, data|
+        acts = filtered_all_acts[file]
+        chapters = data[:chapters]
+        chapters.each do |chap_num, chap_data|
+          acts_by_chap = acts.map { |a| a[:before_chapter] }
+          idx = acts_by_chap.rindex { |n| n && chap_num >= n } || 0
+          act_name = (acts[idx][:line][/^\*\s*Act\s*([\w\-]+)/i, 1] || acts[idx][:line].gsub(/^\*\s*Act\s*/i, '').strip)
+          act_to_chapnums[act_name] << chap_num
+        end
+      end
+      act_chapnums_sorted = act_names.map { |act_name| act_to_chapnums[act_name].to_a.sort }
+      # Step 3: Calculate act paddings for header and bars (only for acts in this book)
+      act_starts = []
+      act_widths = act_chapnums_sorted.map(&:size)
+      pos = 0
+      act_widths.each do |w|
+        act_starts << pos
+        pos += w + 1
+      end
+      pos -= 1 if pos > 0
+      min_spacing = 3
+      act_bar_pads = Array.new(act_names.size, 0)
+      act_name_positions = [0]
+      act_names.each_with_index do |name, idx|
+        next if idx == 0
+        prev_end = act_name_positions[idx-1] + act_names[idx-1].length
+        needed = act_starts[idx] - prev_end
+        if needed < min_spacing
+          pad = min_spacing - needed
+          act_starts[idx..-1].each_with_index { |v, j| act_starts[idx+j] += pad }
+          pos += pad
+          act_bar_pads[idx-1] += pad
+        end
+        act_name_positions << act_starts[idx]
+      end
+      max_filename_len = filtered_target_files.map { |f| File.basename(f).length }.max
+      header = ' ' * (max_filename_len + 2)
+      act_names.each_with_index do |name, idx|
+        header = header.ljust(act_name_positions[idx] + max_filename_len + 2)
+        header[act_name_positions[idx] + max_filename_len + 2, name.length] = name
+      end
+      puts header.rstrip
+      lines = []
+      filtered_target_files.each do |file|
+        acts = filtered_all_acts[file]
+        chapters = filtered_all_data[file][:chapters]
+        # For each act, for each possible chapter, show =/- if present, space if missing
+        bar = '|'
+        act_segments = []
+        act_names.each_with_index do |act_name, act_idx|
+          chapnums = act_chapnums_sorted[act_idx]
+          # Get all chapters for this act in this file, in order
+          file_chapnums = chapnums.select { |chap_num| chapters[chap_num] }
+          seg = ''
+          file_chapnums.each do |chap_num|
+            chap_data = chapters[chap_num]
+            text = chap_data[:full_text]
+            word_count = text.split.size
+            force_done_tag = config[:size_cutoff_force_done] || config[:size_cuttoff_ignore_tag]
+            force_done = force_done_tag && text.match?(force_done_tag)
+            force_incomplete = config[:size_cutoff_force_incomplete] && text.match?(config[:size_cutoff_force_incomplete])
+            is_done = if force_incomplete
+              false
+            elsif force_done
+              true
+            else
+              word_count > $size_cutoff_chapter
+            end
+            seg << (is_done ? "=" : "-")
+          end
+          # Pad with spaces to the right to fill the act's width
+          seg = seg.ljust(act_widths[act_idx])
+          act_segments << seg
+        end
+        # Build the bar from left-aligned, fixed-width segments
+        bar = '|'
+        act_segments.each_with_index do |seg, act_idx|
+          bar << seg
+          bar << ' ' * act_bar_pads[act_idx] + '|' if act_idx < act_names.size - 1
+        end
+        bar = bar.ljust(pos)
+        fname = File.basename(file).ljust(max_filename_len)
+        lines << "#{fname}  #{bar}"
+      end
+      lines.each { |l| puts l.rstrip }
+      puts ""
+    end
+    exit 0
+  end
+  # --- END BOOK SPLIT ANALYSIS LOGIC ---
   # words_minus = cat_prev_str.split.size - cat_str.split.size
   # words_plus = cat_str.split.size - cat_prev_str.split.size
   # words_delta = words_plus - words_minus
@@ -1492,21 +1670,100 @@ task :interleave_txt do
 
   # Build pragma registry and validate
   pragma_registry = build_pragma_registry(all_data, $target_files)
-  
+
   # Report validation errors
   if pragma_registry[:undefined_tags].size > 0
     puts "*** WARNING: Undefined pragma tags: #{pragma_registry[:undefined_tags].join(', ')}"
   end
-  
+
   if pragma_registry[:unused_tags].size > 0
     puts "*** WARNING: Unused pragma tags: #{pragma_registry[:unused_tags].join(', ')}"
   end
-  
+
   if pragma_registry[:circular_deps].size > 0
     abort "*** ERROR: Circular dependencies detected in pragmas: #{pragma_registry[:circular_deps].join(', ')}"
   end
 
   interleaved = build_interleaved_data(all_data, all_acts, max_chapter, pragma_registry)
+
+  # --- BOOK SPLIT FEATURE ---
+  if book_split
+    # Normalize book_split keys and values
+    book_split = book_split.transform_keys(&:to_s)
+    book_to_acts = {}
+    book_split.each do |book, acts|
+      book_to_acts[book] = acts.map(&:to_s)
+    end
+
+    # Gather all act names in the interleaved output (in order of appearance)
+    all_act_names = interleaved.select { |item| item[:type] == :act }.map do |item|
+      # Extract act name (e.g., '1', '2A', '2B', '3') from line
+      line = item[:line]
+      line[/^\*\s*Act\s*([\w\-]+)/i, 1] || line.gsub(/^\*\s*Act\s*/i, '').strip
+    end
+
+    # Validation: every act must be assigned to exactly one book
+    act_to_books = Hash.new { |h, k| h[k] = [] }
+    book_to_acts.each do |book, acts|
+      acts.each { |act| act_to_books[act] << book }
+    end
+
+    # Error if any act is not assigned to a book
+    missing_acts = all_act_names.uniq - act_to_books.keys
+    unless missing_acts.empty?
+      abort "*** ERROR: The following acts are not assigned to any book in book_split: #{missing_acts.join(', ')}"
+    end
+
+    # Error if any act is assigned to multiple books
+    multi_books = act_to_books.select { |act, books| books.size > 1 }
+    unless multi_books.empty?
+      msg = multi_books.map { |act, books| "Act '#{act}' assigned to multiple books: #{books.join(', ')}" }.join("\n  ")
+      abort "*** ERROR: The following acts are assigned to multiple books in book_split:\n  #{msg}"
+    end
+
+    # Output only a specific book if BOOK env var is set
+    selected_books = if ENV['BOOK']
+      [ENV['BOOK'].to_s]
+    else
+      book_to_acts.keys
+    end
+
+    selected_books.each do |book|
+      acts_for_book = book_to_acts[book]
+      # Output acts in the order listed in book_split
+      filtered = []
+      current_act = nil
+      acts_seen = []
+      interleaved.each do |item|
+        if item[:type] == :act
+          act_name = item[:line][/^\*\s*Act\s*([\w\-]+)/i, 1] || item[:line].gsub(/^\*\s*Act\s*/i, '').strip
+          current_act = act_name
+          next unless acts_for_book.include?(act_name)
+          # Only output act if it's in this book
+          filtered << item
+          acts_seen << act_name unless acts_seen.include?(act_name)
+        elsif item[:type] == :chapter
+          # Only output chapters that belong to the current act for this book
+          if current_act && acts_for_book.include?(current_act)
+            filtered << item
+          end
+        end
+      end
+      # Error if acts appear out of order
+      if acts_seen != acts_for_book
+        abort "*** ERROR: Acts for book '#{book}' do not appear in the order specified in book_split.\n  Expected: #{acts_for_book.join(', ')}\n  Found:    #{acts_seen.join(', ')}"
+      end
+      output_text = format_interleaved_as_text(filtered)
+      fname = book.gsub(/[^a-zA-Z0-9_\-]+/, '_') + ".txt"
+      File.open(fname, "w") { |f| f.write(output_text) }
+      puts "Wrote interleaved chapters to #{fname}"
+    end
+    puts "  Max chapter number: #{max_chapter}"
+    puts "  Source files: #{$target_files.join(', ')}"
+    exit 0
+  end
+  # --- END BOOK SPLIT FEATURE ---
+
   output_text = format_interleaved_as_text(interleaved)
 
   File.open("output.txt", "w") do |f|
@@ -1516,7 +1773,7 @@ task :interleave_txt do
   puts "Wrote interleaved chapters to output.txt"
   puts "  Max chapter number: #{max_chapter}"
   puts "  Source files: #{$target_files.join(', ')}"
-  
+
   # Validate pragma constraints in the output
   if pragma_registry[:chapter_dependencies].size > 0 || pragma_registry[:chapter_must_come_before].size > 0 || pragma_registry[:tag_definitions].size > 0
     puts ""
