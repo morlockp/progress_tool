@@ -1,29 +1,29 @@
-  def test_arrows_are_removed_from_output
-    Dir.chdir(@tmp) do
-      # Add a chapter with arrows in the text
-      File.write('fixtures/arrows.txt', <<~TEXT)
+def test_arrows_are_removed_from_output
+  Dir.chdir(@tmp) do
+    # Add a chapter with arrows in the text
+    File.write('fixtures/arrows.txt', <<~TEXT)
         ** chapter 1: arrowy
         This is a line <== with an arrow.
         <=== This line starts with arrows.
         Normal line.
       TEXT
-      File.write('.rakefile.yaml', <<~YAML)
+    File.write('.rakefile.yaml', <<~YAML)
         :target_files:
           - fixtures/arrows.txt
         :title: Arrow Test
         :target_words: 100
         :chapter_head_tag: '** chapter'
       YAML
-      system('rake interleave_txt') or raise 'rake failed'
-      out = File.read('output.txt')
-      # Assert no arrows remain
-      refute_match(/<==+/, out, 'Output should not contain any arrows like <==, <===, etc.')
-      # Assert the rest of the text is present
-      assert_match(/This is a line  with an arrow\./, out)
-      assert_match(/^ This line starts with arrows\./m, out)
-      assert_match(/Normal line\./, out)
-    end
+    system('rake interleave_txt') or raise 'rake failed'
+    out = File.read('output.txt')
+    # Assert no arrows remain
+    refute_match(/<==+/, out, 'Output should not contain any arrows like <==, <===, etc.')
+    # Assert the rest of the text is present
+    assert_match(/This is a line  with an arrow\./, out)
+    assert_match(/^ This line starts with arrows\./m, out)
+    assert_match(/Normal line\./, out)
   end
+end
 require 'minitest/autorun'
 require 'fileutils'
 require 'tmpdir'
