@@ -14,9 +14,11 @@
 #      - chapter listing: rake chapters[047b60168aa7ee1ba2d1d9cd515ddf749ccee8f3]
 
 require 'date'
+require 'cgi'
 require 'fileutils'
 require 'set'
 require 'shellwords'
+require 'tempfile'
 require 'tmpdir'
 require 'yaml'
 
@@ -504,6 +506,7 @@ def default_reference_content_types_xml
       <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
       <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
       <Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>
+      <Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>
     </Types>
   XML
 end
@@ -517,26 +520,31 @@ def default_reference_root_rels_xml
   XML
 end
 
-def default_reference_document_rels_xml
+def default_reference_document_rels_xml(styles = default_docx_styles)
+  rel = if docx_page_numbers_enabled?(styles)
+    '<Relationship Id="rIdHeader1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>'
+  else
+    ''
+  end
+
   <<~XML
     <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-    <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>
+    <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">#{rel}</Relationships>
   XML
 end
 
-def default_reference_document_xml
+def default_reference_document_xml(styles = default_docx_styles)
+  section = docx_section_xml(styles)
+
   <<~XML
     <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-    <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+    <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
       <w:body>
         <w:p>
           <w:pPr><w:pStyle w:val="Normal"/></w:pPr>
           <w:r><w:t>Reference document for generated manuscript output.</w:t></w:r>
         </w:p>
-        <w:sectPr>
-          <w:pgSz w:w="12240" w:h="15840"/>
-          <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>
-        </w:sectPr>
+        #{section}
       </w:body>
     </w:document>
   XML
@@ -551,17 +559,271 @@ def default_reference_settings_xml
   XML
 end
 
-def default_reference_styles_xml
+def default_docx_styles
+  {
+    "font" => "Times New Roman",
+    "color" => "000000",
+    "page" => {
+      "width_inches" => 8.5,
+      "height_inches" => 11,
+      "margin_top_inches" => 1,
+      "margin_right_inches" => 1,
+      "margin_bottom_inches" => 1,
+      "margin_left_inches" => 1,
+      "header_margin_inches" => 0.5,
+      "footer_margin_inches" => 0.5
+    },
+    "page_numbers" => {
+      "enabled" => true,
+      "position" => "header",
+      "align" => "right"
+    },
+    "styles" => {
+      "normal" => {
+        "size" => 12,
+        "bold" => false,
+        "align" => "left",
+        "first_line_indent_inches" => 0.5,
+        "spacing_after_points" => 0,
+        "line_spacing" => "double"
+      },
+      "heading_1" => {
+        "size" => 30,
+        "bold" => true,
+        "align" => "left",
+        "spacing_before_points" => 0,
+        "spacing_after_points" => 0
+      },
+      "heading_2" => {
+        "size" => 12,
+        "bold" => true,
+        "align" => "left",
+        "spacing_before_points" => 0,
+        "spacing_after_points" => 0
+      },
+      "frontmatter_heading_1" => {
+        "size" => 12,
+        "bold" => true,
+        "align" => "left",
+        "spacing_before_points" => 0,
+        "spacing_after_points" => 0
+      },
+      "frontmatter_heading_2" => {
+        "size" => 12,
+        "bold" => true,
+        "align" => "left",
+        "spacing_before_points" => 0,
+        "spacing_after_points" => 0
+      },
+      "title_page_title" => {
+        "size" => 36,
+        "bold" => true,
+        "align" => "center",
+        "spacing_before_inches" => 3,
+        "spacing_after_points" => 0
+      },
+      "title_page_author" => {
+        "size" => 20,
+        "bold" => true,
+        "align" => "center",
+        "spacing_before_inches" => 1,
+        "spacing_after_points" => 0
+      }
+    }
+  }
+end
+
+def stringify_yaml_keys(value)
+  case value
+  when Hash
+    value.each_with_object({}) { |(key, val), out| out[key.to_s.sub(/\A:/, "")] = stringify_yaml_keys(val) }
+  when Array
+    value.map { |item| stringify_yaml_keys(item) }
+  else
+    value
+  end
+end
+
+def deep_merge_hashes(base, override)
+  base.merge(override) do |_key, old_val, new_val|
+    old_val.is_a?(Hash) && new_val.is_a?(Hash) ? deep_merge_hashes(old_val, new_val) : new_val
+  end
+end
+
+def docx_styles_file(config = {})
+  config[:docx_styles] || config["docx_styles"] || ".docx_styles.yaml"
+end
+
+def create_default_docx_styles_yaml(path, overwrite = false)
+  return if File.exist?(path) && !overwrite
+
+  File.write(path, default_docx_styles.to_yaml)
+end
+
+def load_docx_styles(path = ".docx_styles.yaml")
+  styles = default_docx_styles
+  if path && File.exist?(path)
+    loaded = YAML.load_file(path) || {}
+    styles = deep_merge_hashes(styles, stringify_yaml_keys(loaded))
+  end
+  styles
+end
+
+def docx_style(styles, name)
+  styles.fetch("styles", {}).fetch(name, {})
+end
+
+def docx_points_to_half_points(points)
+  (points.to_f * 2).round
+end
+
+def docx_points_to_twips(points)
+  (points.to_f * 20).round
+end
+
+def docx_inches_to_twips(inches)
+  (inches.to_f * 1440).round
+end
+
+def docx_line_spacing_twips(style)
+  case style["line_spacing"].to_s
+  when "double"
+    480
+  when "single"
+    240
+  when "1.5"
+    360
+  else
+    return docx_points_to_twips(style["line_spacing_points"]) if style.key?("line_spacing_points")
+
+    480
+  end
+end
+
+def docx_spacing_twips(style, key)
+  inches_key = "#{key}_inches"
+  points_key = "#{key}_points"
+  return docx_inches_to_twips(style[inches_key]) if style.key?(inches_key)
+  return docx_points_to_twips(style[points_key]) if style.key?(points_key)
+
+  nil
+end
+
+def docx_align_xml(style)
+  align = style["align"]
+  return "" if align.nil? || align.to_s.strip == ""
+
+  %(<w:jc w:val="#{CGI.escapeHTML(align.to_s)}"/>)
+end
+
+def docx_first_line_indent_xml(style)
+  return "" unless style.key?("first_line_indent_inches")
+
+  %(<w:ind w:firstLine="#{docx_inches_to_twips(style["first_line_indent_inches"])}"/>)
+end
+
+def docx_bold_xml(style)
+  return "" unless style["bold"]
+
+  "<w:b/>\n          <w:bCs/>"
+end
+
+def docx_page_numbers_enabled?(styles)
+  page_numbers = styles.fetch("page_numbers", {})
+  page_numbers.fetch("enabled", false) && page_numbers.fetch("position", "header").to_s == "header"
+end
+
+def docx_section_xml(styles)
+  page = styles.fetch("page", {})
+  page_width = docx_inches_to_twips(page.fetch("width_inches", 8.5))
+  page_height = docx_inches_to_twips(page.fetch("height_inches", 11))
+  top = docx_inches_to_twips(page.fetch("margin_top_inches", 1))
+  right = docx_inches_to_twips(page.fetch("margin_right_inches", 1))
+  bottom = docx_inches_to_twips(page.fetch("margin_bottom_inches", 1))
+  left = docx_inches_to_twips(page.fetch("margin_left_inches", 1))
+  header = docx_inches_to_twips(page.fetch("header_margin_inches", 0.5))
+  footer = docx_inches_to_twips(page.fetch("footer_margin_inches", 0.5))
+  header_reference = docx_page_numbers_enabled?(styles) ? %(<w:headerReference w:type="default" r:id="rIdHeader1"/>) : ""
+
+  <<~XML
+    <w:sectPr>
+      #{header_reference}
+      <w:pgSz w:w="#{page_width}" w:h="#{page_height}"/>
+      <w:pgMar w:top="#{top}" w:right="#{right}" w:bottom="#{bottom}" w:left="#{left}" w:header="#{header}" w:footer="#{footer}" w:gutter="0"/>
+    </w:sectPr>
+  XML
+end
+
+def default_reference_header_xml(styles = default_docx_styles)
+  page_numbers = styles.fetch("page_numbers", {})
+  align = CGI.escapeHTML(page_numbers.fetch("align", "right").to_s)
+  font = CGI.escapeHTML(styles["font"].to_s)
+  normal_size = docx_points_to_half_points(docx_style(styles, "normal")["size"])
+
+  <<~XML
+    <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    <w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+      <w:p>
+        <w:pPr><w:jc w:val="#{align}"/></w:pPr>
+        <w:r>
+          <w:rPr>
+            <w:rFonts w:ascii="#{font}" w:hAnsi="#{font}" w:eastAsia="#{font}" w:cs="#{font}"/>
+            <w:sz w:val="#{normal_size}"/>
+            <w:szCs w:val="#{normal_size}"/>
+          </w:rPr>
+          <w:fldChar w:fldCharType="begin"/>
+        </w:r>
+        <w:r><w:instrText xml:space="preserve">PAGE</w:instrText></w:r>
+        <w:r><w:fldChar w:fldCharType="end"/></w:r>
+      </w:p>
+    </w:hdr>
+  XML
+end
+
+def default_reference_styles_xml(styles = default_docx_styles)
+  font = CGI.escapeHTML(styles["font"].to_s)
+  color = CGI.escapeHTML(styles["color"].to_s)
+  normal = docx_style(styles, "normal")
+  heading_1 = docx_style(styles, "heading_1")
+  heading_2 = docx_style(styles, "heading_2")
+  frontmatter_heading_1 = docx_style(styles, "frontmatter_heading_1")
+  frontmatter_heading_2 = docx_style(styles, "frontmatter_heading_2")
+  title = docx_style(styles, "title_page_title")
+  author = docx_style(styles, "title_page_author")
+  normal_size = docx_points_to_half_points(normal["size"])
+  normal_after = docx_spacing_twips(normal, "spacing_after") || 160
+  normal_line = docx_line_spacing_twips(normal)
+  heading_1_size = docx_points_to_half_points(heading_1["size"])
+  heading_1_before = docx_spacing_twips(heading_1, "spacing_before") || 240
+  heading_1_after = docx_spacing_twips(heading_1, "spacing_after") || 120
+  heading_2_size = docx_points_to_half_points(heading_2["size"])
+  heading_2_before = docx_spacing_twips(heading_2, "spacing_before") || 200
+  heading_2_after = docx_spacing_twips(heading_2, "spacing_after") || 100
+  frontmatter_heading_1_size = docx_points_to_half_points(frontmatter_heading_1["size"])
+  frontmatter_heading_1_before = docx_spacing_twips(frontmatter_heading_1, "spacing_before") || 0
+  frontmatter_heading_1_after = docx_spacing_twips(frontmatter_heading_1, "spacing_after") || 0
+  frontmatter_heading_2_size = docx_points_to_half_points(frontmatter_heading_2["size"])
+  frontmatter_heading_2_before = docx_spacing_twips(frontmatter_heading_2, "spacing_before") || 0
+  frontmatter_heading_2_after = docx_spacing_twips(frontmatter_heading_2, "spacing_after") || 0
+  title_size = docx_points_to_half_points(title["size"])
+  title_before = docx_spacing_twips(title, "spacing_before") || 4320
+  title_after = docx_spacing_twips(title, "spacing_after") || 0
+  title_align = CGI.escapeHTML((title["align"] || "center").to_s)
+  author_size = docx_points_to_half_points(author["size"])
+  author_before = docx_spacing_twips(author, "spacing_before") || 1440
+  author_after = docx_spacing_twips(author, "spacing_after") || 0
+  author_align = CGI.escapeHTML((author["align"] || "center").to_s)
+
   <<~XML
     <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
     <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
       <w:docDefaults>
         <w:rPrDefault>
           <w:rPr>
-            <w:rFonts w:ascii="Garamond" w:hAnsi="Garamond" w:eastAsia="Garamond" w:cs="Garamond"/>
-            <w:color w:val="000000"/>
-            <w:sz w:val="20"/>
-            <w:szCs w:val="20"/>
+            <w:rFonts w:ascii="#{font}" w:hAnsi="#{font}" w:eastAsia="#{font}" w:cs="#{font}"/>
+            <w:color w:val="#{color}"/>
+            <w:sz w:val="#{normal_size}"/>
+            <w:szCs w:val="#{normal_size}"/>
           </w:rPr>
         </w:rPrDefault>
       </w:docDefaults>
@@ -569,13 +831,16 @@ def default_reference_styles_xml
         <w:name w:val="Normal"/>
         <w:qFormat/>
         <w:pPr>
-          <w:spacing w:after="160" w:line="276" w:lineRule="auto"/>
+          #{docx_align_xml(normal)}
+          #{docx_first_line_indent_xml(normal)}
+          <w:spacing w:after="#{normal_after}" w:line="#{normal_line}" w:lineRule="auto"/>
         </w:pPr>
         <w:rPr>
-          <w:rFonts w:ascii="Garamond" w:hAnsi="Garamond" w:eastAsia="Garamond" w:cs="Garamond"/>
-          <w:color w:val="000000"/>
-          <w:sz w:val="20"/>
-          <w:szCs w:val="20"/>
+          <w:rFonts w:ascii="#{font}" w:hAnsi="#{font}" w:eastAsia="#{font}" w:cs="#{font}"/>
+          #{docx_bold_xml(normal)}
+          <w:color w:val="#{color}"/>
+          <w:sz w:val="#{normal_size}"/>
+          <w:szCs w:val="#{normal_size}"/>
         </w:rPr>
       </w:style>
       <w:style w:type="paragraph" w:styleId="Heading1">
@@ -585,16 +850,16 @@ def default_reference_styles_xml
         <w:qFormat/>
         <w:pPr>
           <w:keepNext/>
-          <w:spacing w:before="240" w:after="120"/>
+          #{docx_align_xml(heading_1)}
+          <w:spacing w:before="#{heading_1_before}" w:after="#{heading_1_after}"/>
           <w:outlineLvl w:val="0"/>
         </w:pPr>
         <w:rPr>
-          <w:rFonts w:ascii="Garamond" w:hAnsi="Garamond" w:eastAsia="Garamond" w:cs="Garamond"/>
-          <w:b/>
-          <w:bCs/>
-          <w:color w:val="000000"/>
-          <w:sz w:val="30"/>
-          <w:szCs w:val="30"/>
+          <w:rFonts w:ascii="#{font}" w:hAnsi="#{font}" w:eastAsia="#{font}" w:cs="#{font}"/>
+          #{docx_bold_xml(heading_1)}
+          <w:color w:val="#{color}"/>
+          <w:sz w:val="#{heading_1_size}"/>
+          <w:szCs w:val="#{heading_1_size}"/>
         </w:rPr>
       </w:style>
       <w:style w:type="paragraph" w:styleId="Heading2">
@@ -604,16 +869,52 @@ def default_reference_styles_xml
         <w:qFormat/>
         <w:pPr>
           <w:keepNext/>
-          <w:spacing w:before="200" w:after="100"/>
+          #{docx_align_xml(heading_2)}
+          <w:spacing w:before="#{heading_2_before}" w:after="#{heading_2_after}"/>
           <w:outlineLvl w:val="1"/>
         </w:pPr>
         <w:rPr>
-          <w:rFonts w:ascii="Garamond" w:hAnsi="Garamond" w:eastAsia="Garamond" w:cs="Garamond"/>
-          <w:b/>
-          <w:bCs/>
-          <w:color w:val="000000"/>
-          <w:sz w:val="24"/>
-          <w:szCs w:val="24"/>
+          <w:rFonts w:ascii="#{font}" w:hAnsi="#{font}" w:eastAsia="#{font}" w:cs="#{font}"/>
+          #{docx_bold_xml(heading_2)}
+          <w:color w:val="#{color}"/>
+          <w:sz w:val="#{heading_2_size}"/>
+          <w:szCs w:val="#{heading_2_size}"/>
+        </w:rPr>
+      </w:style>
+      <w:style w:type="paragraph" w:styleId="FrontmatterHeading1">
+        <w:name w:val="Frontmatter Heading 1"/>
+        <w:basedOn w:val="Normal"/>
+        <w:next w:val="Normal"/>
+        <w:qFormat/>
+        <w:pPr>
+          <w:keepNext/>
+          #{docx_align_xml(frontmatter_heading_1)}
+          <w:spacing w:before="#{frontmatter_heading_1_before}" w:after="#{frontmatter_heading_1_after}"/>
+        </w:pPr>
+        <w:rPr>
+          <w:rFonts w:ascii="#{font}" w:hAnsi="#{font}" w:eastAsia="#{font}" w:cs="#{font}"/>
+          #{docx_bold_xml(frontmatter_heading_1)}
+          <w:color w:val="#{color}"/>
+          <w:sz w:val="#{frontmatter_heading_1_size}"/>
+          <w:szCs w:val="#{frontmatter_heading_1_size}"/>
+        </w:rPr>
+      </w:style>
+      <w:style w:type="paragraph" w:styleId="FrontmatterHeading2">
+        <w:name w:val="Frontmatter Heading 2"/>
+        <w:basedOn w:val="Normal"/>
+        <w:next w:val="Normal"/>
+        <w:qFormat/>
+        <w:pPr>
+          <w:keepNext/>
+          #{docx_align_xml(frontmatter_heading_2)}
+          <w:spacing w:before="#{frontmatter_heading_2_before}" w:after="#{frontmatter_heading_2_after}"/>
+        </w:pPr>
+        <w:rPr>
+          <w:rFonts w:ascii="#{font}" w:hAnsi="#{font}" w:eastAsia="#{font}" w:cs="#{font}"/>
+          #{docx_bold_xml(frontmatter_heading_2)}
+          <w:color w:val="#{color}"/>
+          <w:sz w:val="#{frontmatter_heading_2_size}"/>
+          <w:szCs w:val="#{frontmatter_heading_2_size}"/>
         </w:rPr>
       </w:style>
       <w:style w:type="paragraph" w:styleId="TitlePageTitle">
@@ -622,16 +923,15 @@ def default_reference_styles_xml
         <w:next w:val="TitlePageAuthor"/>
         <w:qFormat/>
         <w:pPr>
-          <w:jc w:val="center"/>
-          <w:spacing w:before="4320" w:after="0"/>
+          <w:jc w:val="#{title_align}"/>
+          <w:spacing w:before="#{title_before}" w:after="#{title_after}"/>
         </w:pPr>
         <w:rPr>
-          <w:rFonts w:ascii="Garamond" w:hAnsi="Garamond" w:eastAsia="Garamond" w:cs="Garamond"/>
-          <w:b/>
-          <w:bCs/>
-          <w:color w:val="000000"/>
-          <w:sz w:val="46"/>
-          <w:szCs w:val="46"/>
+          <w:rFonts w:ascii="#{font}" w:hAnsi="#{font}" w:eastAsia="#{font}" w:cs="#{font}"/>
+          #{docx_bold_xml(title)}
+          <w:color w:val="#{color}"/>
+          <w:sz w:val="#{title_size}"/>
+          <w:szCs w:val="#{title_size}"/>
         </w:rPr>
       </w:style>
       <w:style w:type="paragraph" w:styleId="TitlePageAuthor">
@@ -640,34 +940,36 @@ def default_reference_styles_xml
         <w:next w:val="Normal"/>
         <w:qFormat/>
         <w:pPr>
-          <w:jc w:val="center"/>
-          <w:spacing w:before="1440" w:after="0"/>
+          <w:jc w:val="#{author_align}"/>
+          <w:spacing w:before="#{author_before}" w:after="#{author_after}"/>
         </w:pPr>
         <w:rPr>
-          <w:rFonts w:ascii="Garamond" w:hAnsi="Garamond" w:eastAsia="Garamond" w:cs="Garamond"/>
-          <w:b/>
-          <w:bCs/>
-          <w:color w:val="000000"/>
-          <w:sz w:val="22"/>
-          <w:szCs w:val="22"/>
+          <w:rFonts w:ascii="#{font}" w:hAnsi="#{font}" w:eastAsia="#{font}" w:cs="#{font}"/>
+          #{docx_bold_xml(author)}
+          <w:color w:val="#{color}"/>
+          <w:sz w:val="#{author_size}"/>
+          <w:szCs w:val="#{author_size}"/>
         </w:rPr>
       </w:style>
     </w:styles>
   XML
 end
 
-def create_default_reference_docx(path, overwrite = false)
+def create_default_reference_docx(path, overwrite = false, styles_file = ".docx_styles.yaml")
   return if File.exist?(path) && !overwrite
+
+  styles = load_docx_styles(styles_file)
 
   Dir.mktmpdir("reference_docx") do |dir|
     FileUtils.mkdir_p(File.join(dir, "_rels"))
     FileUtils.mkdir_p(File.join(dir, "word", "_rels"))
     File.write(File.join(dir, "[Content_Types].xml"), default_reference_content_types_xml)
     File.write(File.join(dir, "_rels", ".rels"), default_reference_root_rels_xml)
-    File.write(File.join(dir, "word", "document.xml"), default_reference_document_xml)
-    File.write(File.join(dir, "word", "styles.xml"), default_reference_styles_xml)
+    File.write(File.join(dir, "word", "document.xml"), default_reference_document_xml(styles))
+    File.write(File.join(dir, "word", "styles.xml"), default_reference_styles_xml(styles))
     File.write(File.join(dir, "word", "settings.xml"), default_reference_settings_xml)
-    File.write(File.join(dir, "word", "_rels", "document.xml.rels"), default_reference_document_rels_xml)
+    File.write(File.join(dir, "word", "header1.xml"), default_reference_header_xml(styles)) if docx_page_numbers_enabled?(styles)
+    File.write(File.join(dir, "word", "_rels", "document.xml.rels"), default_reference_document_rels_xml(styles))
 
     absolute_path = File.expand_path(path)
     FileUtils.rm_f(absolute_path)
@@ -692,11 +994,13 @@ task :init do
   - ./story.txt
 :title: "title goes here"
 :author: "author goes here"
+:draft: 0
 :target_words: 125000
 :date_start: '#{Date.today}'
 :chapter_head_tag: '** chapter'
 :frontmatter: []
 :docx_reference: .default.docx
+:docx_styles: .docx_styles.yaml
 :size_cuttoff_chapter: 600
 :size_cutoff_force_done: 'AAA-chapter-complete'
 # use the tag below to force a chapter to be marked incomplete even if it exceeds the cutoff
@@ -704,14 +1008,18 @@ task :init do
 STRING
               )
   end
-  create_default_reference_docx(".default.docx", true)
+  create_default_docx_styles_yaml(".docx_styles.yaml")
+  create_default_reference_docx(".default.docx", true, ".docx_styles.yaml")
   puts "created file ./#{yaml_file}"
+  puts "created file ./.docx_styles.yaml"
   puts "created file ./.default.docx"
 end
 
 desc "create or overwrite the default DOCX reference file"
 task :init_docx do
-  create_default_reference_docx(".default.docx", true)
+  create_default_docx_styles_yaml(".docx_styles.yaml")
+  create_default_reference_docx(".default.docx", true, ".docx_styles.yaml")
+  puts "created file ./.docx_styles.yaml"
   puts "created file ./.default.docx"
 end
 
@@ -1326,7 +1634,7 @@ end
 
 task :clean do |t|
   `rm -f  '##{$target_file}#' '##{$target_file}' 2> /dev/null`
-  `rm -f output.txt output.html output.docx *~ .\#* \#* 2> /dev/null`
+  `rm -f output.txt output.html output.docx *_draft_*.txt *_draft_*.html *_draft_*.docx *~ .\#* \#* 2> /dev/null`
   
   # do the globbing manually to avoid interactions between Ruby `...` and shell stuff
   # that was causing globbing not to work
@@ -1460,6 +1768,32 @@ end
 def parse_chapters_and_acts_from_contents(contents, file_path, config)
   chapter_head_tag = config[:chapter_head_tag] || "== chapter"
   lines = contents.split("\n")
+  before_first_act = true
+  leading_xxx_lines = []
+  cleaned_lines = []
+  source_id = extract_source_id(file_path)
+
+  idx = 0
+  while idx < lines.size
+    line = lines[idx]
+    before_first_act = false if line.match?(/^\* Act\b/i)
+    if before_first_act && line.match?(/^\s*XXX\b/)
+      comment_lines = [line]
+      idx += 1
+      while idx < lines.size && lines[idx].strip != ""
+        comment_lines << lines[idx]
+        idx += 1
+      end
+      leading_xxx_lines << { :line => reflow_xxx_comment(comment_lines), :source_id => source_id }
+      next
+    end
+
+    cleaned_lines << line
+    idx += 1
+  end
+
+  contents = cleaned_lines.join("\n")
+  lines = cleaned_lines
   
   acts = []
   chapters = {}
@@ -1533,7 +1867,7 @@ def parse_chapters_and_acts_from_contents(contents, file_path, config)
     }
   end
   
-  { :chapters => chapters, :acts => acts }
+  { :chapters => chapters, :acts => acts, :leading_xxx_lines => leading_xxx_lines }
 end
 
 # Helper to extract source identifier from filename (e.g., "lopez" from "story_lopez.txt")
@@ -1545,6 +1879,14 @@ def extract_source_id(filename)
   else
     basename.upcase
   end
+end
+
+def label_leading_xxx_line(line, source_id)
+  line.sub(/^(\s*)XXX\b/, "\\1XXX #{source_id}")
+end
+
+def reflow_xxx_comment(lines)
+  lines.map(&:strip).reject(&:empty?).join(" ").gsub(/\s+/, " ")
 end
 
 # Parse pragmas from chapter text
@@ -2090,11 +2432,43 @@ def frontmatter_text(config)
   contents.join("\n\n") + "\n\n"
 end
 
-def markdown_file_to_html(file)
-  html = `pandoc #{Shellwords.escape(file)} -t html`
-  abort "*** ERROR: Failed to convert frontmatter markdown #{file} to HTML using pandoc" unless $?.success?
+def markdown_list_item?(line)
+  line.match?(/^\s{0,3}([-+*]|\d+[.)])\s+\S/)
+end
 
-  html
+def normalize_markdown_frontmatter(contents)
+  lines = contents.lines
+  output = []
+  idx = 0
+
+  while idx < lines.size
+    line = lines[idx]
+    if line.strip == "" && output.any? && markdown_list_item?(output.last)
+      next_idx = idx + 1
+      next_idx += 1 while next_idx < lines.size && lines[next_idx].strip == ""
+      if next_idx < lines.size && markdown_list_item?(lines[next_idx])
+        idx += 1
+        next
+      end
+    end
+
+    output << line
+    idx += 1
+  end
+
+  output.join
+end
+
+def markdown_file_to_html(file)
+  IO.popen(["pandoc", "-f", "markdown", "-t", "html"], "r+") do |io|
+    io.write(normalize_markdown_frontmatter(read_frontmatter_file(file)))
+    io.close_write
+    html = io.read
+    io.close
+    abort "*** ERROR: Failed to convert frontmatter markdown #{file} to HTML using pandoc" unless $?.success?
+
+    html
+  end
 end
 
 def plain_text_to_html(text)
@@ -2146,6 +2520,11 @@ def title_page_html(config)
   html_parts.join("\n") + "\n"
 end
 
+def chapter_header_from_interleaved_item(item)
+  lines = remove_arrows(item[:text]).split("\n")
+  lines[0].sub(/^\*\*\s*/, "")
+end
+
 # Format interleaved data as plain text
 def format_interleaved_as_text(interleaved, config = nil)
   output_lines = []
@@ -2154,6 +2533,9 @@ def format_interleaved_as_text(interleaved, config = nil)
 
   interleaved.each do |item|
     if item[:type] == :act
+      output_lines << remove_arrows(item[:line])
+      output_lines << ""
+    elsif item[:type] == :xxx
       output_lines << remove_arrows(item[:line])
       output_lines << ""
     elsif item[:type] == :chapter
@@ -2166,13 +2548,22 @@ def format_interleaved_as_text(interleaved, config = nil)
 end
 
 # Format interleaved data as HTML
-def format_interleaved_as_html(interleaved, config = nil, include_title_page = false, frontmatter_page_breaks = false)
+def format_interleaved_as_html(interleaved, config = nil, include_title_page = false, frontmatter_page_breaks = false, include_toc = false)
   require 'cgi'
 
   html_parts = []
-  html_parts << title_page_html(config) if config && include_title_page
+  if config && include_title_page
+    html_parts << title_page_html(config)
+    html_parts << "<p>DOCX_TITLE_PAGE_BREAK</p>"
+  end
+  if include_toc
+    html_parts << "<p>DOCX_TOC_INSERT</p>"
+    html_parts << "<p>DOCX_TOC_PAGE_BREAK</p>"
+  end
   html_parts << (frontmatter_page_breaks ? frontmatter_html_with_page_break_markers(config) : frontmatter_html(config)) if config
+  html_parts << "<p>DOCX_MANUSCRIPT_START</p>" if include_toc
 
+  chapter_idx = 0
   interleaved.each do |item|
     if item[:type] == :act
       # Remove leading asterisks from act line: "* Act 1: ..." -> "<h1>Act 1: ...</h1>"
@@ -2181,6 +2572,10 @@ def format_interleaved_as_html(interleaved, config = nil, include_title_page = f
       # Process italics in act text
       act_text = process_italics_for_html(act_text)
       html_parts << "<h1>#{act_text}</h1>"
+      html_parts << "<p>DOCX_ACT_PAGE_BREAK</p>" if include_toc
+    elsif item[:type] == :xxx
+      xxx_text = remove_arrows(item[:line])
+      html_parts << "<p>#{CGI.escapeHTML(xxx_text)}</p>"
     elsif item[:type] == :chapter
       # Parse chapter header and content
       lines = remove_arrows(item[:text]).split("\n")
@@ -2188,7 +2583,8 @@ def format_interleaved_as_html(interleaved, config = nil, include_title_page = f
       chapter_header = lines[0].sub(/^\*\*\s*/, "")
       # Process italics in chapter header
       chapter_header = process_italics_for_html(chapter_header)
-      html_parts << "<h2>#{chapter_header}</h2>"
+      chapter_idx += 1
+      html_parts << %(<h2 id="chapter-#{chapter_idx}">#{chapter_header}</h2>)
       
       # Remaining lines are chapter content
       content_lines = lines[1..-1] || []
@@ -2203,8 +2599,11 @@ def format_interleaved_as_html(interleaved, config = nil, include_title_page = f
           html_parts << "<p>#{para_text}</p>"
         end
       end
+      html_parts << "<p>DOCX_CHAPTER_PAGE_BREAK</p>" if include_toc
     end
   end
+
+  html_parts << "<p>DOCX_MANUSCRIPT_END</p>" if include_toc
 
   html_parts.join("\n")
 end
@@ -2213,11 +2612,13 @@ def build_interleaved_chapters_for_targets(config)
   all_data = {}
   all_acts = {}
   max_chapter = 0
+  leading_xxx_lines = []
 
   $target_files.each do |file|
     data = parse_chapters_and_acts_from_file(file, config)
     all_data[file] = data
     all_acts[file] = data[:acts]
+    leading_xxx_lines.concat(data[:leading_xxx_lines] || [])
     max_chapter = [max_chapter, data[:chapters].keys.max || 0].max
   end
 
@@ -2242,6 +2643,11 @@ def build_interleaved_chapters_for_targets(config)
   end
 
   interleaved = build_interleaved_data(all_data, all_acts, max_chapter, pragma_registry)
+  unless leading_xxx_lines.empty?
+    interleaved = leading_xxx_lines.map do |entry|
+      { :type => :xxx, :line => label_leading_xxx_line(entry[:line], entry[:source_id]) }
+    end + interleaved
+  end
 
   {
     :all_data => all_data,
@@ -2265,7 +2671,20 @@ def print_pragma_output_validation(interleaved, pragma_registry, all_data)
   end
 end
 
-desc "Interleave chapters from all source files and write to output.txt"
+def draft_output_basename(config)
+  title = config[:title] || config["title"] || $title || "output"
+  draft = config[:draft] || config["draft"] || 0
+  title_part = title.to_s.strip.gsub(/\s+/, "_").gsub(/[\/\\]/, "_")
+  title_part = "output" if title_part == ""
+
+  "#{title_part}_draft_#{draft}"
+end
+
+def draft_output_file(config, extension)
+  "#{draft_output_basename(config)}.#{extension.to_s.sub(/\A\./, "")}"
+end
+
+desc "Interleave chapters from all source files and write to <title>_draft_<N>.txt"
 task :interleave_txt do
   result = build_interleaved_chapters_for_targets(config)
   all_data = result[:all_data]
@@ -2329,6 +2748,8 @@ task :interleave_txt do
           # Only output act if it's in this book
           filtered << item
           acts_seen << act_name unless acts_seen.include?(act_name)
+        elsif item[:type] == :xxx
+          filtered << item
         elsif item[:type] == :chapter
           # Only output chapters that belong to the current act for this book
           if current_act && acts_for_book.include?(current_act)
@@ -2351,12 +2772,13 @@ task :interleave_txt do
   # --- END BOOK SPLIT FEATURE ---
 
   output_text = format_interleaved_as_text(interleaved, config)
+  output_file = draft_output_file(config, "txt")
 
-  File.open("output.txt", "w") do |f|
+  File.open(output_file, "w") do |f|
     f.write(output_text)
   end
 
-  puts "Wrote interleaved chapters to output.txt"
+  puts "Wrote interleaved chapters to #{output_file}"
   print_interleave_summary(max_chapter)
 
   # Validate pragma constraints in the output
@@ -2394,6 +2816,21 @@ def docx_reference_file(config)
   config[:docx_reference] || config["docx_reference"] || ".default.docx"
 end
 
+def default_docx_reference?(reference_file)
+  File.basename(reference_file.to_s) == ".default.docx"
+end
+
+def refresh_default_docx_reference_if_needed(config)
+  reference_file = docx_reference_file(config)
+  return unless default_docx_reference?(reference_file)
+
+  styles_file = docx_styles_file(config)
+  create_default_docx_styles_yaml(styles_file)
+  return if File.exist?(reference_file) && File.mtime(reference_file) >= File.mtime(styles_file)
+
+  create_default_reference_docx(reference_file, true, styles_file)
+end
+
 def pandoc_docx_reference_args(config)
   reference_file = docx_reference_file(config)
   return [] if reference_file.nil? || reference_file.to_s.strip == ""
@@ -2408,8 +2845,9 @@ end
 
 # Helper function to convert HTML to DOCX using Pandoc
 # Pandoc properly preserves heading hierarchy
-def convert_html_to_docx_pandoc(html_file, docx_file, config = {})
-  args = ["pandoc", html_file] + pandoc_docx_reference_args(config) + ["-o", docx_file]
+def convert_html_to_docx_pandoc(html_file, docx_file, config = {}, include_toc = false)
+  args = ["pandoc", html_file]
+  args += pandoc_docx_reference_args(config) + ["-o", docx_file]
   result = system(*args)
   
   unless result && File.exist?(docx_file)
@@ -2451,7 +2889,269 @@ def docx_page_break_paragraph
   %(<w:p><w:r><w:br w:type="page"/></w:r></w:p>)
 end
 
-def postprocess_docx_title_page(docx_file, config)
+DOCX_MANUSCRIPT_BOOKMARK = "RakefileManuscriptBody"
+
+def next_docx_bookmark_id(xml)
+  ids = xml.scan(/<w:bookmarkStart\b[^>]*\bw:id="(\d+)"/).flatten.map(&:to_i)
+  (ids.max || 0) + 1
+end
+
+def replace_docx_manuscript_boundary_markers(xml)
+  bookmark_id = next_docx_bookmark_id(xml)
+  start_replaced = false
+  end_replaced = false
+
+  xml = xml.gsub(/<w:p\b.*?<\/w:p>/m) do |paragraph|
+    if !start_replaced && paragraph.include?("DOCX_MANUSCRIPT_START")
+      start_replaced = true
+      %(<w:p><w:bookmarkStart w:id="#{bookmark_id}" w:name="#{DOCX_MANUSCRIPT_BOOKMARK}"/></w:p>)
+    elsif !end_replaced && paragraph.include?("DOCX_MANUSCRIPT_END")
+      end_replaced = true
+      %(<w:p><w:bookmarkEnd w:id="#{bookmark_id}"/></w:p>)
+    else
+      paragraph
+    end
+  end
+
+  xml
+end
+
+def style_docx_headings_before_manuscript(xml)
+  before_manuscript = true
+
+  xml.gsub(/<w:p\b.*?<\/w:p>/m) do |paragraph|
+    if paragraph.include?("DOCX_MANUSCRIPT_START")
+      before_manuscript = false
+      paragraph
+    elsif before_manuscript
+      paragraph
+        .gsub(/<w:pStyle\s+w:val="Heading1"\s*\/>/, '<w:pStyle w:val="FrontmatterHeading1"/>')
+        .gsub(/<w:pStyle\s+w:val="Heading2"\s*\/>/, '<w:pStyle w:val="FrontmatterHeading2"/>')
+    else
+      paragraph
+    end
+  end
+end
+
+def extract_docx_table_of_contents_block(xml)
+  toc_block = xml[/<w:sdt\b.*?<w:docPartGallery\s+w:val="Table of Contents"\s*\/?>.*?<\/w:sdt>/m]
+  return [xml, ""] unless toc_block
+
+  [xml.sub(toc_block, ""), toc_block]
+end
+
+def scope_docx_toc_to_manuscript_bookmark(toc_block)
+  return toc_block if toc_block.empty? || toc_block.include?("\\b #{DOCX_MANUSCRIPT_BOOKMARK}")
+
+  toc_block.sub(/TOC ((?:(?!<\/w:instrText>).)*)/m) do
+    "TOC #{$1} \\b #{DOCX_MANUSCRIPT_BOOKMARK}"
+  end
+end
+
+def mark_docx_fields_for_update(zip)
+  entry = zip.find_entry("word/settings.xml")
+  return unless entry
+
+  settings_xml = entry.get_input_stream.read
+  return if settings_xml.include?("<w:updateFields")
+
+  settings_xml = settings_xml.sub("</w:settings>", %(<w:updateFields w:val="true"/></w:settings>))
+  zip.get_output_stream("word/settings.xml") { |f| f.write(settings_xml) }
+end
+
+def executable_in_path(*names)
+  names.each do |name|
+    ENV.fetch("PATH", "").split(File::PATH_SEPARATOR).each do |dir|
+      path = File.join(dir, name)
+      return path if File.executable?(path) && !File.directory?(path)
+    end
+  end
+  nil
+end
+
+def libreoffice_refresh_script
+  <<~PY
+    import os
+    import sys
+    import time
+    import uno
+
+    from com.sun.star.beans import PropertyValue
+
+    docx_path = os.path.abspath(sys.argv[1])
+    port = sys.argv[2]
+
+    def prop(name, value):
+        p = PropertyValue()
+        p.Name = name
+        p.Value = value
+        return p
+
+    def insert_native_toc(document):
+        descriptor = document.createSearchDescriptor()
+        descriptor.SearchString = "DOCX_TOC_INSERT"
+        found = document.findFirst(descriptor)
+        if found is None:
+            return
+
+        toc = document.createInstance("com.sun.star.text.ContentIndex")
+        toc.CreateFromOutline = True
+        toc.CreateFromMarks = False
+        toc.CreateFromLevelParagraphStyles = False
+        toc.Level = 3
+        toc.Title = "Table of Contents"
+
+        found.getText().insertTextContent(found, toc, True)
+        toc.update()
+
+    local_ctx = uno.getComponentContext()
+    resolver = local_ctx.ServiceManager.createInstanceWithContext(
+        "com.sun.star.bridge.UnoUrlResolver",
+        local_ctx,
+    )
+
+    last_error = None
+    ctx = None
+    for _ in range(12):
+        try:
+            ctx = resolver.resolve(
+                "uno:socket,host=127.0.0.1,port=%s;urp;StarOffice.ComponentContext" % port
+            )
+            break
+        except Exception as exc:
+            last_error = exc
+            time.sleep(0.25)
+
+    if ctx is None:
+        raise RuntimeError("could not connect to LibreOffice: %s" % last_error)
+
+    desktop = ctx.ServiceManager.createInstanceWithContext("com.sun.star.frame.Desktop", ctx)
+    url = uno.systemPathToFileUrl(docx_path)
+    load_attempts = [
+        (
+            prop("Hidden", True),
+            prop("ReadOnly", False),
+            prop("UpdateDocMode", 3),
+        ),
+        (
+            prop("Hidden", True),
+            prop("ReadOnly", False),
+            prop("UpdateDocMode", 3),
+            prop("FilterName", "Office Open XML Text"),
+        ),
+        (
+            prop("Hidden", True),
+            prop("ReadOnly", False),
+            prop("UpdateDocMode", 3),
+            prop("FilterName", "MS Word 2007 XML"),
+        ),
+        (
+            prop("Hidden", True),
+            prop("ReadOnly", False),
+            prop("UpdateDocMode", 3),
+            prop("FilterName", "Office Open XML Text Template"),
+        ),
+    ]
+
+    document = None
+    for args in load_attempts:
+        document = desktop.loadComponentFromURL(url, "_blank", 0, args)
+        if document is not None:
+            break
+
+    if document is None:
+        raise RuntimeError("LibreOffice could not open %s" % docx_path)
+
+    try:
+        insert_native_toc(document)
+
+        try:
+            indexes = document.getDocumentIndexes()
+            for idx in range(indexes.getCount()):
+                indexes.getByIndex(idx).update()
+        except Exception:
+            pass
+
+        try:
+            fields = document.getTextFields().createEnumeration()
+            while fields.hasMoreElements():
+                field = fields.nextElement()
+                if hasattr(field, "update"):
+                    field.update()
+        except Exception:
+            pass
+
+        refreshed_path = docx_path + ".toc-refresh.docx"
+        refreshed_url = uno.systemPathToFileUrl(refreshed_path)
+        document.storeToURL(
+            refreshed_url,
+            (
+                prop("FilterName", "Office Open XML Text"),
+                prop("Overwrite", True),
+            ),
+        )
+    finally:
+        document.close(True)
+
+    if os.path.exists(refreshed_path):
+        os.replace(refreshed_path, docx_path)
+  PY
+end
+
+def refresh_docx_fields_with_libreoffice(docx_file)
+  libreoffice = executable_in_path("libreoffice", "soffice")
+  python = File.executable?("/usr/bin/python3") ? "/usr/bin/python3" : executable_in_path("python3")
+  return false unless libreoffice && python
+
+  profile_dir = Dir.mktmpdir("rakefile-libreoffice-profile")
+  cache_dir = Dir.mktmpdir("rakefile-libreoffice-cache")
+  script = Tempfile.new(["rakefile-refresh-docx-fields", ".py"])
+  port = (20_000 + rand(20_000)).to_s
+  accept = "socket,host=127.0.0.1,port=#{port};urp;StarOffice.ServiceManager"
+  env = {
+    "HOME" => profile_dir,
+    "XDG_CONFIG_HOME" => File.join(profile_dir, "config"),
+    "XDG_CACHE_HOME" => cache_dir,
+    "XDG_RUNTIME_DIR" => File.join(profile_dir, "runtime")
+  }
+
+  begin
+    FileUtils.mkdir_p(env["XDG_RUNTIME_DIR"])
+    File.chmod(0700, env["XDG_RUNTIME_DIR"])
+    script.write(libreoffice_refresh_script)
+    script.close
+    profile_uri = "file://#{File.join(profile_dir, "profile")}"
+    pid = spawn(
+      env,
+      libreoffice,
+      "-env:UserInstallation=#{profile_uri}",
+      "--headless",
+      "--invisible",
+      "--nologo",
+      "--nodefault",
+      "--nofirststartwizard",
+      "--accept=#{accept}",
+      :out => File::NULL,
+      :err => File::NULL
+    )
+
+    success = system(env, python, script.path, File.expand_path(docx_file), port, :out => File::NULL, :err => File::NULL)
+    success
+  rescue
+    false
+  ensure
+    begin
+      Process.kill("TERM", pid) if pid
+      Process.wait(pid) if pid
+    rescue
+    end
+    script.close! if script
+    FileUtils.remove_entry(profile_dir) if profile_dir && Dir.exist?(profile_dir)
+    FileUtils.remove_entry(cache_dir) if cache_dir && Dir.exist?(cache_dir)
+  end
+end
+
+def postprocess_docx_title_page(docx_file, config, interleaved = [])
   require 'zip'
 
   title = config[:title] || config["title"] || $title
@@ -2472,23 +3172,37 @@ def postprocess_docx_title_page(docx_file, config)
         title_done = true
         paragraph = set_docx_paragraph_style(paragraph, "TitlePageTitle")
         paragraph = center_docx_paragraph(paragraph)
-        paragraph = add_docx_page_break_after_paragraph(paragraph) if author_done
         paragraph
       elsif !author_done && paragraph.include?(author_text)
         author_done = true
         paragraph = set_docx_paragraph_style(paragraph, "TitlePageAuthor")
         paragraph = center_docx_paragraph(paragraph)
-        add_docx_page_break_after_paragraph(paragraph)
+        paragraph
       else
-        paragraph.include?("DOCX_FRONTMATTER_PAGE_BREAK_") ? docx_page_break_paragraph : paragraph
+        if paragraph.include?("DOCX_FRONTMATTER_PAGE_BREAK_") ||
+           paragraph.include?("DOCX_TITLE_PAGE_BREAK") ||
+           paragraph.include?("DOCX_TOC_PAGE_BREAK") ||
+           paragraph.include?("DOCX_ACT_PAGE_BREAK") ||
+           paragraph.include?("DOCX_CHAPTER_PAGE_BREAK")
+          docx_page_break_paragraph
+        else
+          paragraph
+        end
       end
     end
 
+    xml = style_docx_headings_before_manuscript(xml)
+    xml = replace_docx_manuscript_boundary_markers(xml)
     zip.get_output_stream("word/document.xml") { |f| f.write(xml) }
+    mark_docx_fields_for_update(zip)
+  end
+
+  if ENV["RAKEFILE_SKIP_DOCX_TOC_REFRESH"] != "1" && !refresh_docx_fields_with_libreoffice(docx_file)
+    warn "*** WARNING: Could not refresh DOCX table of contents fields with LibreOffice; open the DOCX and update fields if page numbers are stale"
   end
 end
 
-desc "Interleave chapters from all source files and write to output.html"
+desc "Interleave chapters from all source files and write to <title>_draft_<N>.html"
 task :interleave_html do
   require 'cgi'
 
@@ -2498,17 +3212,18 @@ task :interleave_html do
   pragma_registry = result[:pragma_registry]
   interleaved = result[:interleaved]
   output_html = format_interleaved_as_html(interleaved, config)
+  output_file = draft_output_file(config, "html")
 
-  File.open("output.html", "w") do |f|
+  File.open(output_file, "w") do |f|
     f.write(output_html)
   end
 
-  puts "Wrote interleaved chapters to output.html"
+  puts "Wrote interleaved chapters to #{output_file}"
   print_interleave_summary(max_chapter)
   print_pragma_output_validation(interleaved, pragma_registry, all_data)
 end
 
-desc "Interleave chapters from all source files and write to output.docx"
+desc "Interleave chapters from all source files and write to <title>_draft_<N>.docx"
 task :interleave_doc do
   require 'cgi'
 
@@ -2517,10 +3232,10 @@ task :interleave_doc do
   max_chapter = result[:max_chapter]
   pragma_registry = result[:pragma_registry]
   interleaved = result[:interleaved]
-  output_html = format_interleaved_as_html(interleaved, config, true, true)
+  output_html = format_interleaved_as_html(interleaved, config, true, true, true)
 
   # Write HTML to temporary file
-  html_file = "output.html"
+  html_file = draft_output_file(config, "html")
   File.open(html_file, "w") do |f|
     f.write(output_html)
   end
@@ -2528,9 +3243,10 @@ task :interleave_doc do
   puts "Wrote interleaved chapters to #{html_file}"
   
   # Convert HTML to DOCX using pandoc (preserves heading hierarchy)
-  docx_file = "output.docx"
-  convert_html_to_docx_pandoc(html_file, docx_file, config)
-  postprocess_docx_title_page(docx_file, config)
+  docx_file = draft_output_file(config, "docx")
+  refresh_default_docx_reference_if_needed(config)
+  convert_html_to_docx_pandoc(html_file, docx_file, config, true)
+  postprocess_docx_title_page(docx_file, config, interleaved)
   
   puts "Converted to #{docx_file}"
   print_interleave_summary(max_chapter)

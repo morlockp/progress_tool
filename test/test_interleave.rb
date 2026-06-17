@@ -15,7 +15,7 @@ def test_arrows_are_removed_from_output
         :chapter_head_tag: '** chapter'
       YAML
     system('rake interleave_txt') or raise 'rake failed'
-    out = File.read('output.txt')
+    out = File.read(Dir['*_draft_0.txt'].first)
     # Assert no arrows remain
     refute_match(/<==+/, out, 'Output should not contain any arrows like <==, <===, etc.')
     # Assert the rest of the text is present
@@ -53,7 +53,8 @@ class InterleaveTest < Minitest::Test
       # run rake task
       system('rake interleave_txt') or raise 'rake failed'
 
-      out = File.read('output.txt')
+      assert File.exist?('Interleave_Test_draft_0.txt')
+      out = File.read(Dir['*_draft_0.txt'].first)
       expected = File.read(File.expand_path('expected_output.txt', __dir__))
 
       # normalize line endings
@@ -77,7 +78,7 @@ class InterleaveTest < Minitest::Test
       YAML
 
       system('rake interleave_txt') or raise 'rake failed'
-      out = File.read('output.txt')
+      out = File.read(Dir['*_draft_0.txt'].first)
 
       assert out.start_with?("Dramatis Personae\nAlice\n")
       assert out.index("Dramatis Personae") < out.index("** chapter")
@@ -102,10 +103,106 @@ class InterleaveTest < Minitest::Test
       YAML
 
       system('rake interleave_txt') or raise 'rake failed'
-      out = File.read('output.txt')
+      out = File.read(Dir['*_draft_0.txt'].first)
 
       assert out.index("First front section") < out.index("Second front section")
       assert out.index("Second front section") < out.index("** chapter")
+    end
+  end
+
+  def test_interleave_collects_xxx_lines_before_first_act
+    Dir.chdir(@tmp) do
+      File.write('fixtures/story_a.txt', <<~TEXT)
+        XXX this is one complete
+        comment that should be preserved as a single item
+
+        XXX this is a second comment
+
+        * Act 1: shared beginning
+
+        ** chapter 1: first
+        one
+
+        XXX A post-act note
+      TEXT
+      File.write('fixtures/story_b.txt', <<~TEXT)
+        XXX this is
+        comment number three
+
+        * Act 1: shared beginning
+
+        ** chapter 1: alpha
+        alpha
+      TEXT
+      File.write('front.txt', "Front matter\n")
+      File.write('.rakefile.yaml', <<~YAML)
+        :target_files:
+          - fixtures/story_a.txt
+          - fixtures/story_b.txt
+        :frontmatter:
+          - front.txt
+        :title: XXX Test
+        :target_words: 100
+        :date_start: '2026-03-02'
+        :chapter_head_tag: '** chapter'
+      YAML
+
+      system('rake interleave_txt') or raise 'rake failed'
+      out = File.read(Dir['*_draft_0.txt'].first)
+
+      first_comment = "XXX A this is one complete comment that should be preserved as a single item"
+      second_comment = "XXX A this is a second comment"
+      third_comment = "XXX B this is comment number three"
+
+      assert out.index("Front matter") < out.index(first_comment)
+      assert out.index(first_comment) < out.index(second_comment)
+      assert out.index(second_comment) < out.index(third_comment)
+      assert out.index(third_comment) < out.index("* Act 1: shared beginning")
+      assert out.index("XXX A post-act note") > out.index("one")
+      assert_equal 1, out.scan(/#{Regexp.escape(first_comment)}/).size
+      assert_equal 1, out.scan(/#{Regexp.escape(second_comment)}/).size
+      assert_equal 1, out.scan(/#{Regexp.escape(third_comment)}/).size
+    end
+  end
+
+  def test_book_split_keeps_collected_xxx_lines_before_first_act
+    Dir.chdir(@tmp) do
+      File.write('fixtures/story_a.txt', <<~TEXT)
+        XXX pre-act note
+
+        * Act 1: shared beginning
+
+        ** chapter 1: first
+        one
+      TEXT
+      File.write('fixtures/story_b.txt', <<~TEXT)
+        XXX pre-act note
+
+        * Act 1: shared beginning
+
+        ** chapter 1: alpha
+        alpha
+      TEXT
+      File.write('.rakefile.yaml', <<~YAML)
+        :target_files:
+          - fixtures/story_a.txt
+          - fixtures/story_b.txt
+        :title: XXX Book Split Test
+        :target_words: 100
+        :date_start: '2026-03-02'
+        :chapter_head_tag: '** chapter'
+        :book_split:
+          Book One:
+            - "1"
+      YAML
+
+      system('rake interleave_txt') or raise 'rake failed'
+      out = File.read('Book_One.txt')
+
+      assert out.index("XXX A pre-act note") < out.index("XXX B pre-act note")
+      assert out.index("XXX B pre-act note") < out.index("* Act 1: shared beginning")
+      assert_equal 1, out.scan(/XXX A pre-act note/).size
+      assert_equal 1, out.scan(/XXX B pre-act note/).size
     end
   end
 
@@ -115,6 +212,7 @@ class InterleaveTest < Minitest::Test
         # Dramatis
 
         - Alice
+
         - Bob
       MD
       File.write('.rakefile.yaml', <<~YAML)
@@ -130,10 +228,12 @@ class InterleaveTest < Minitest::Test
       YAML
 
       system('rake interleave_html') or raise 'rake failed'
-      out = File.read('output.html')
+      out = File.read(Dir['*_draft_0.html'].first)
 
       assert_match(/<h1[^>]*>Dramatis<\/h1>/, out)
       assert_match(/<li>Alice<\/li>/, out)
+      assert_match(/<li>Bob<\/li>/, out)
+      refute_match(/<li><p>Alice<\/p><\/li>/, out)
       assert out.index("Dramatis") < out.index("chapter")
     end
   end
@@ -144,7 +244,7 @@ class InterleaveTest < Minitest::Test
       assert $?.success?, 'rake ich failed'
       plain_out = out.gsub(/\e\[[0-9;]*m/, "")
 
-      refute File.exist?('output.txt'), 'ich should not write output.txt'
+      refute Dir['*_draft_0.txt'].any?, 'ich should not write a draft txt file'
       assert_match(/Built interleaved chapters in memory/, plain_out)
       assert_match(/\| interleaved/, plain_out)
       assert_match(/\|\s+1\s+.*\(LOPEZ 1\): One/, plain_out)
@@ -193,7 +293,7 @@ class InterleaveTest < Minitest::Test
       YAML
 
       system('rake interleave_txt') or raise 'rake failed'
-      out = File.read('output.txt')
+      out = File.read(Dir['*_draft_0.txt'].first)
 
       assert_match(/\*\* chapter 3 \(A 2\) \(later\): second/, out)
       refute_match(/\*\* chapter 2 \(later\):/, out)
@@ -230,7 +330,7 @@ class InterleaveTest < Minitest::Test
       YAML
 
       system('rake interleave_txt') or raise 'rake failed'
-      out = File.read('output.txt')
+      out = File.read(Dir['*_draft_0.txt'].first)
 
       assert_equal 1, out.scan(/^\* Act 1: shared beginning$/).size
       assert_match(/^\* Act 2: second-file-only act$/m, out)
@@ -271,7 +371,7 @@ class InterleaveTest < Minitest::Test
       YAML
 
       system('rake interleave_txt') or raise 'rake failed'
-      out = File.read('output.txt')
+      out = File.read(Dir['*_draft_0.txt'].first)
 
       assert out.index("b two") < out.index("* Act 2: later")
       assert out.index("* Act 2: later") < out.index("a two")

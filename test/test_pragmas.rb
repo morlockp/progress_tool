@@ -350,7 +350,7 @@ YAML
       system('rake interleave_txt') or raise 'rake failed'
       
       # Read output and verify ordering
-      output = File.read('output.txt')
+      output = File.read(Dir['*_draft_0.txt'].first)
       
       # B's chapter 1 should appear before A's chapter 1 despite file order
       # Because A's chapter 1 depends on B's setup
@@ -390,7 +390,7 @@ YAML
 
       system('rake interleave_txt') or raise 'rake failed'
 
-      output = File.read('output.txt')
+      output = File.read(Dir['*_draft_0.txt'].first)
       a1_pos = output.index("A chapter one content")
       a2_pos = output.index("A chapter two content")
 
