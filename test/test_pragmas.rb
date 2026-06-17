@@ -2,10 +2,12 @@ require 'minitest/autorun'
 require 'fileutils'
 require 'tmpdir'
 require 'set'
+require 'rake'
+
+REPO_RAKEFILE = File.expand_path('../rakefile', __dir__)
+load REPO_RAKEFILE
 
 class PragmasTest < Minitest::Test
-  REPO_RAKEFILE = File.expand_path('../rakefile', __dir__)
-
   def setup
     @tmp = Dir.mktmpdir('pragma_test')
     Dir.chdir(@tmp) do
@@ -16,17 +18,6 @@ class PragmasTest < Minitest::Test
 
   def teardown
     FileUtils.remove_entry(@tmp) if @tmp && Dir.exist?(@tmp)
-  end
-
-  # Helper to load just the functions from rakefile, not the tasks
-  def load_pragma_functions
-    code = File.read(REPO_RAKEFILE)
-    # Extract just the helper functions, not the Rake tasks
-    # We'll use eval with a specific subset of the code
-    eval code, binding, REPO_RAKEFILE
-  rescue => e
-    # If load fails due to missing Rake methods, that's ok - we only need functions
-    nil
   end
 
   def test_parse_pragmas_define_tag
@@ -271,7 +262,7 @@ class PragmasTest < Minitest::Test
       
       all_chapters = ["file1:1", "file1:2", "file1:3"]
       
-      sorted = topological_sort_chapters(chapter_dependencies, tag_definitions, all_chapters)
+      sorted = topological_sort_chapters(chapter_dependencies, {}, tag_definitions, all_chapters)
       
       # Check order respects dependencies
       idx_1 = sorted.index("file1:1")
@@ -301,7 +292,7 @@ class PragmasTest < Minitest::Test
       
       all_chapters = ["file1:1", "file1:2", "file1:3", "file1:4"]
       
-      sorted = topological_sort_chapters(chapter_dependencies, tag_definitions, all_chapters)
+      sorted = topological_sort_chapters(chapter_dependencies, {}, tag_definitions, all_chapters)
       
       # Check order respects dependencies
       idx_1 = sorted.index("file1:1")
@@ -318,7 +309,7 @@ class PragmasTest < Minitest::Test
       chapter_dependencies = {}
       all_chapters = ["file1:1", "file1:2", "file1:3"]
       
-      sorted = topological_sort_chapters(chapter_dependencies, tag_definitions, all_chapters)
+      sorted = topological_sort_chapters(chapter_dependencies, {}, tag_definitions, all_chapters)
       
       # Should still return all chapters
       assert_equal 3, sorted.size
@@ -370,6 +361,43 @@ YAML
     end
   end
 
+  def test_pragma_sort_preserves_source_file_chapter_order
+    Dir.chdir(@tmp) do
+      File.write('fixtures/story_a.txt', <<~TEXT)
+        ** chapter 1: delayed intro
+        # MUST-BE-AFTER: b-setup
+        A chapter one content.
+
+        ** chapter 2: should stay after one
+        A chapter two content.
+      TEXT
+
+      File.write('fixtures/story_b.txt', <<~TEXT)
+        ** chapter 1: setup
+        # DEFINE-TAG: b-setup
+        B setup content.
+      TEXT
+
+      File.write('.rakefile.yaml', <<~YAML)
+:target_files:
+  - fixtures/story_a.txt
+  - fixtures/story_b.txt
+:title: "Test Source Order"
+:target_words: 1000
+:date_start: '2026-03-06'
+:chapter_head_tag: '** chapter'
+YAML
+
+      system('rake interleave_txt') or raise 'rake failed'
+
+      output = File.read('output.txt')
+      a1_pos = output.index("A chapter one content")
+      a2_pos = output.index("A chapter two content")
+
+      assert a1_pos < a2_pos, "A chapter 1 should stay before A chapter 2"
+    end
+  end
+
   def test_pragma_constraint_violation_caught
     Dir.chdir(@tmp) do
       # Create a scenario where pragmas create an impossible constraint
@@ -400,252 +428,4 @@ YAML
       assert !result, "Task should fail due to circular dependency"
     end
   end
-end
-
-# Load pragma functions from rakefile at module load time
-def parse_pragmas_from_chapter_text(chapter_text)
-  defines = nil
-  depends_on = []
-  must_come_before = []
-  
-  chapter_text.each_line do |line|
-    # Look for DEFINE-TAG pragma
-    if line =~ /^\s*#\s*DEFINE-TAG:\s*(\S+)/
-      defines = $1
-    end
-    
-    # Look for MUST-BE-AFTER pragma(s) - can have multiple occurrences
-    if line =~ /^\s*#\s*MUST-BE-AFTER:\s*(.+)/
-      deps_str = $1
-      # Split by comma, strip whitespace from each
-      deps_str.split(',').each do |dep|
-        dep_tag = dep.strip
-        depends_on << dep_tag if dep_tag != ""
-      end
-    end
-    
-    # Look for MUST-BE-BEFORE pragma(s) - can have multiple occurrences
-    if line =~ /^\s*#\s*MUST-BE-BEFORE:\s*(.+)/
-      before_str = $1
-      # Split by comma, strip whitespace from each
-      before_str.split(',').each do |tag|
-        tag_name = tag.strip
-        must_come_before << tag_name if tag_name != ""
-      end
-    end
-  end
-  
-  { :defines => defines, :depends_on => depends_on, :must_come_before => must_come_before }
-end
-
-def build_pragma_registry(all_data, all_files)
-  tag_definitions = {}
-  chapter_dependencies = {}
-  undefined_tags = Set.new
-  unused_tags = Set.new
-  circular_deps = []
-  
-  # First pass: collect all DEFINE-TAG pragmas
-  all_files.each do |file|
-    next unless all_data[file]
-    
-    all_data[file][:chapters].each do |local_ch_num, chapter_data|
-      pragmas = chapter_data[:pragmas] || { :defines => nil, :depends_on => [] }
-      
-      if pragmas[:defines]
-        tag_name = pragmas[:defines]
-        chapter_id = "#{file}:#{local_ch_num}"
-        
-        if tag_definitions[tag_name]
-          abort "*** ERROR: Tag '#{tag_name}' defined multiple times: in #{tag_definitions[tag_name]} and #{chapter_id}"
-        end
-        
-        tag_definitions[tag_name] = chapter_id
-        unused_tags.add(tag_name)
-      end
-    end
-  end
-  
-  # Second pass: collect all MUST-BE-AFTER dependencies and mark tags as used
-  all_files.each do |file|
-    next unless all_data[file]
-    
-    all_data[file][:chapters].each do |local_ch_num, chapter_data|
-      pragmas = chapter_data[:pragmas] || { :defines => nil, :depends_on => [] }
-      
-      if pragmas[:depends_on].size > 0
-        chapter_id = "#{file}:#{local_ch_num}"
-        chapter_dependencies[chapter_id] = pragmas[:depends_on].dup
-        
-        pragmas[:depends_on].each do |tag|
-          if tag_definitions[tag]
-            unused_tags.delete(tag)
-          else
-            undefined_tags.add(tag)
-          end
-        end
-      end
-    end
-  end
-  
-  # Detect circular dependencies using DFS
-  visited = Set.new
-  rec_stack = Set.new
-  
-  def has_cycle_dfs(chapter_id, graph, visited, rec_stack, tag_definitions)
-    visited.add(chapter_id)
-    rec_stack.add(chapter_id)
-    
-    deps = graph[chapter_id] || []
-    deps.each do |tag|
-      dep_chapter_id = tag_definitions[tag]
-      next unless dep_chapter_id
-      
-      if !visited.include?(dep_chapter_id)
-        if has_cycle_dfs(dep_chapter_id, graph, visited, rec_stack, tag_definitions)
-          return true
-        end
-      elsif rec_stack.include?(dep_chapter_id)
-        return true
-      end
-    end
-    
-    rec_stack.delete(chapter_id)
-    false
-  end
-  
-  chapter_dependencies.keys.each do |chapter_id|
-    if !visited.include?(chapter_id)
-      if has_cycle_dfs(chapter_id, chapter_dependencies, visited, rec_stack, tag_definitions)
-        circular_deps << chapter_id
-      end
-    end
-  end
-  
-  {
-    :tag_definitions => tag_definitions,
-    :chapter_dependencies => chapter_dependencies,
-    :undefined_tags => undefined_tags.to_a,
-    :unused_tags => unused_tags.to_a,
-    :circular_deps => circular_deps
-  }
-end
-
-def topological_sort_chapters(chapter_dependencies, tag_definitions, all_chapters_by_id)
-  in_degree = {}
-  adjacency = {}
-  
-  all_chapters_by_id.each do |chapter_id|
-    in_degree[chapter_id] = 0
-    adjacency[chapter_id] = []
-  end
-  
-  chapter_dependencies.each do |chapter_id, dep_tags|
-    dep_tags.each do |tag|
-      dep_chapter_id = tag_definitions[tag]
-      next unless dep_chapter_id
-      
-      adjacency[dep_chapter_id] ||= []
-      adjacency[dep_chapter_id] << chapter_id
-      in_degree[chapter_id] = (in_degree[chapter_id] || 0) + 1
-    end
-  end
-  
-  queue = []
-  in_degree.each do |chapter_id, degree|
-    queue << chapter_id if degree == 0
-  end
-  
-  sorted = []
-  while queue.size > 0
-    current = queue.shift
-    sorted << current
-    
-    (adjacency[current] || []).each do |neighbor|
-      in_degree[neighbor] -= 1
-      queue << neighbor if in_degree[neighbor] == 0
-    end
-  end
-  
-  if sorted.size != all_chapters_by_id.size
-    abort "*** ERROR: Topological sort failed - cycle detected in pragma dependencies"
-  end
-  
-  sorted
-end
-
-def parse_chapters_and_acts_from_file(file_path, config)
-  chapter_head_tag = config[:chapter_head_tag] || "== chapter"
-  
-  if !File.exist?(file_path)
-    warn "*** warning: file #{file_path} not found"
-    return { :chapters => {}, :acts => [] }
-  end
-  
-  contents = File.read(file_path)
-  lines = contents.split("\n")
-  
-  acts = []
-  chapters = {}
-  current_chapter_num = nil
-  last_act_before_chapter = nil
-  last_act_before_chapter_lineno = nil
-  
-  lines.each_with_index do |line, idx|
-    lineno = idx + 1
-    if line =~ /^\* /
-      if line !~ /^\* Act /
-        bytes = line.bytes.map { |b| sprintf("%02x", b) }.join(' ')
-        if line =~ /chapter/i
-          abort "*** SYNTAX ERROR in #{file_path}: Line #{lineno}: starts with '*' but not followed by 'Act': #{line.inspect}\n  bytes: #{bytes}\n  Hint: did you forget an extra asterisk for the chapter?"
-        else
-          abort "*** SYNTAX ERROR in #{file_path}: Line #{lineno}: starts with '*' but not followed by 'Act': #{line.inspect}\n  bytes: #{bytes}"
-        end
-      end
-      last_act_before_chapter = line
-      last_act_before_chapter_lineno = lineno
-    elsif line =~ /^#{Regexp.escape(chapter_head_tag)}\s/
-      line.match(/ (\d+)/)
-      if $1
-        current_chapter_num = $1.to_i
-        if last_act_before_chapter
-          acts << { :line => last_act_before_chapter, :before_chapter => current_chapter_num, :line_no => last_act_before_chapter_lineno }
-          last_act_before_chapter = nil
-          last_act_before_chapter_lineno = nil
-        end
-      end
-    end
-  end
-  
-  arr = contents.split(chapter_head_tag)
-  arr = arr.slice(1..9999)
-  arr ||= []
-  
-  arr.each do |text|
-    lines = text.split("\n")
-    title_line = lines[0]
-    
-    title_line.match(/ (\d+)/)
-    chapter_num_str = $1
-    
-    next unless chapter_num_str
-    
-    chap_num = chapter_num_str.to_i
-    
-    content_lines = lines.reject { |l| l =~ /^\* Act / }
-    clean_text = content_lines.join("\n")
-    
-    full_text = "#{chapter_head_tag}#{clean_text}"
-    
-    pragmas = parse_pragmas_from_chapter_text(full_text)
-    
-    chapters[chap_num] = {
-      :title => title_line,
-      :full_text => full_text,
-      :source_file => file_path,
-      :pragmas => pragmas
-    }
-  end
-  
-  { :chapters => chapters, :acts => acts }
 end

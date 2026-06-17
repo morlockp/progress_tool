@@ -14,6 +14,10 @@
 #      - chapter listing: rake chapters[047b60168aa7ee1ba2d1d9cd515ddf749ccee8f3]
 
 require 'date'
+require 'fileutils'
+require 'set'
+require 'shellwords'
+require 'tmpdir'
 require 'yaml'
 
 class Numeric
@@ -96,7 +100,7 @@ def get_target_content(files, git_hash = nil)
   content
 end
 
-def get_chapter_hash(config, git_hash)
+def get_chapter_hash(config, git_hash, target_files = $target_files, content_by_file = nil)
 
   chapter_head_tag = config[:chapter_head_tag] || "== chapter"
   
@@ -108,8 +112,10 @@ def get_chapter_hash(config, git_hash)
   chapter_global_num = {}
   ii = 0
   
-  $target_files.each do |file|
-    if git_hash
+  target_files.each do |file|
+    if content_by_file && content_by_file.key?(file)
+      contents = content_by_file[file]
+    elsif git_hash
       contents = `git show #{git_hash}:#{file}`
     else
       if File.exist?(file)
@@ -151,7 +157,7 @@ def get_chapter_hash(config, git_hash)
 
       chapter_arrows[unique_key] = text.match?(/<---/)
 
-      title = title_line.split(":")[1..].join(":")
+      title = title_line.sub(/^\s*\d+\s*/, "").sub(/^:\s*/, "").strip
       chapter_titles[unique_key] = title
 
       # allow explicit override tags
@@ -197,6 +203,123 @@ def get_chapter_hash(config, git_hash)
            :avg            => avg,
            :std_dev        => std_dev  }
   
+end
+
+THREAD_BACKGROUND_COLOR_CODES = [101, 102, 103, 104, 105, 106, 107]
+
+def terminal_color_enabled?
+  STDOUT.tty? && !ENV.key?("NO_COLOR")
+end
+
+def ansi_color(text, code, enabled = terminal_color_enabled?)
+  return text unless enabled
+
+  "\e[#{code}m#{text}\e[0m"
+end
+
+def ansi_style(text, codes, enabled = terminal_color_enabled?)
+  return text unless enabled
+
+  "\e[#{Array(codes).join(';')}m#{text}\e[0m"
+end
+
+def thread_background_color_code(thread_name)
+  THREAD_BACKGROUND_COLOR_CODES[thread_name.bytes.sum % THREAD_BACKGROUND_COLOR_CODES.size]
+end
+
+def color_thread_names(text, enabled = terminal_color_enabled?)
+  return text unless enabled
+
+  text.gsub(/\(([A-Z][A-Z0-9_-]+)(\s+\d+[^)]*\))/) do
+    ansi_style("(#{$1}#{$2}", [1, 30, thread_background_color_code($1)], true)
+  end
+end
+
+def format_done_marker(done, enabled = terminal_color_enabled?)
+  done ? ansi_style("✓", [1, 32], enabled) : " "
+end
+
+def print_chapter_report(title, config, ret, target_files = $target_files, content_by_file = nil, color_threads = false, hide_done = false)
+  color_enabled = color_threads == :always || (color_threads && terminal_color_enabled?)
+  color_enabled = false if ENV.key?("ICH_NO_COLOR")
+  done           = ret[:done]
+  notdone        = ret[:notdone]
+  avg            = ret[:avg]
+  chapter_words  = ret[:chapter_words]
+  chapter_titles = ret[:chapter_titles]
+  std_dev        = ret[:std_dev]
+  arrows         = ret[:chapter_arrows]
+  chapter_done   = ret[:chapter_done]
+  chapter_file   = ret[:chapter_file]
+  chapter_global_num = ret[:chapter_global_num]
+
+  puts ""
+  puts "  +--------------------"
+  puts "  | #{title}"
+  puts "  | "
+  puts "  |  ch                                             words      stddevs"
+  puts "  |  ---------------------------------------------------------------"
+  
+  target_files.each do |file|
+    puts "  | #{file}"
+    
+    # Parse acts for this file to track act boundaries
+    file_data = if content_by_file && content_by_file.key?(file)
+      parse_chapters_and_acts_from_contents(content_by_file[file], file, config)
+    else
+      parse_chapters_and_acts_from_file(file, config)
+    end
+    acts_by_chapter = {}
+    file_data[:acts].each do |act_info|
+      before_ch = act_info[:before_chapter]
+      act_line = act_info[:line]
+      acts_by_chapter[before_ch] = act_line
+    end
+    
+    last_act = nil
+    chapter_words.each_pair do |key, words|
+      next unless chapter_file[key] == file
+      
+      ch_num = chapter_global_num[key]
+      
+      # Check if there's an act transition at this chapter
+      if acts_by_chapter[ch_num]
+        current_act = acts_by_chapter[ch_num]
+        # Extract act name (e.g., "Act 2-A" from "* Act 2-A")
+        if current_act =~ /\* (Act .+)/
+          current_act_name = $1
+        else
+          current_act_name = current_act
+        end
+        
+        # Print separator if act changed and it's not the first act or it's transitioning from Act 1
+        if last_act && current_act_name != last_act && current_act_name != "Act 1"
+          puts "  | --- #{current_act_name}"
+        end
+        last_act = current_act_name
+      end
+      
+      next if hide_done && chapter_done[key]
+
+      sigma = std_dev == 0.0 ? 0 : ((words - avg).abs / std_dev).floor
+      ch_done = format_done_marker(chapter_done[key], color_enabled)
+      title_column = sprintf('%-50s', chapter_titles[key][0...50])
+      title_column = color_thread_names(title_column, color_enabled)
+      puts "  | #{sprintf('%3i', ch_num) }  #{ch_done} #{title_column} #{sprintf('%6s',words.commify)}    #{ sprintf('%5s',(words > avg ? "+":"-") * sigma)}     #{arrows[key] ? "<--" : ""}"
+    end
+    puts "  | ----------"
+  end
+
+  
+  puts "  |\n"
+  puts "  |\n"
+  puts "  | * #{done} chapters done, avg words = #{avg.commify}"
+  puts "  | * stddev = #{std_dev.floor.commify}"
+  puts "  | * #{notdone} chapters not done"
+  puts "  | * target words @ this rate = #{ ((chapter_words.size * avg) ).commify}"
+  puts "  | * target pages @ this rate = #{ ((chapter_words.size * avg) / 250).commify}"
+  puts "  +--------------------"
+  puts ""
 end
 
 desc "Show ASCII art progress graph for all target files"
@@ -371,6 +494,191 @@ task :graph do
   # Step 6: Print output
   lines.each { |l| puts l.rstrip }
 end
+
+def default_reference_content_types_xml
+  <<~XML
+    <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+      <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+      <Default Extension="xml" ContentType="application/xml"/>
+      <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+      <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
+      <Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>
+    </Types>
+  XML
+end
+
+def default_reference_root_rels_xml
+  <<~XML
+    <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+      <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+    </Relationships>
+  XML
+end
+
+def default_reference_document_rels_xml
+  <<~XML
+    <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>
+  XML
+end
+
+def default_reference_document_xml
+  <<~XML
+    <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+      <w:body>
+        <w:p>
+          <w:pPr><w:pStyle w:val="Normal"/></w:pPr>
+          <w:r><w:t>Reference document for generated manuscript output.</w:t></w:r>
+        </w:p>
+        <w:sectPr>
+          <w:pgSz w:w="12240" w:h="15840"/>
+          <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>
+        </w:sectPr>
+      </w:body>
+    </w:document>
+  XML
+end
+
+def default_reference_settings_xml
+  <<~XML
+    <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    <w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+      <w:zoom w:percent="100"/>
+    </w:settings>
+  XML
+end
+
+def default_reference_styles_xml
+  <<~XML
+    <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+      <w:docDefaults>
+        <w:rPrDefault>
+          <w:rPr>
+            <w:rFonts w:ascii="Garamond" w:hAnsi="Garamond" w:eastAsia="Garamond" w:cs="Garamond"/>
+            <w:color w:val="000000"/>
+            <w:sz w:val="20"/>
+            <w:szCs w:val="20"/>
+          </w:rPr>
+        </w:rPrDefault>
+      </w:docDefaults>
+      <w:style w:type="paragraph" w:default="1" w:styleId="Normal">
+        <w:name w:val="Normal"/>
+        <w:qFormat/>
+        <w:pPr>
+          <w:spacing w:after="160" w:line="276" w:lineRule="auto"/>
+        </w:pPr>
+        <w:rPr>
+          <w:rFonts w:ascii="Garamond" w:hAnsi="Garamond" w:eastAsia="Garamond" w:cs="Garamond"/>
+          <w:color w:val="000000"/>
+          <w:sz w:val="20"/>
+          <w:szCs w:val="20"/>
+        </w:rPr>
+      </w:style>
+      <w:style w:type="paragraph" w:styleId="Heading1">
+        <w:name w:val="heading 1"/>
+        <w:basedOn w:val="Normal"/>
+        <w:next w:val="Normal"/>
+        <w:qFormat/>
+        <w:pPr>
+          <w:keepNext/>
+          <w:spacing w:before="240" w:after="120"/>
+          <w:outlineLvl w:val="0"/>
+        </w:pPr>
+        <w:rPr>
+          <w:rFonts w:ascii="Garamond" w:hAnsi="Garamond" w:eastAsia="Garamond" w:cs="Garamond"/>
+          <w:b/>
+          <w:bCs/>
+          <w:color w:val="000000"/>
+          <w:sz w:val="30"/>
+          <w:szCs w:val="30"/>
+        </w:rPr>
+      </w:style>
+      <w:style w:type="paragraph" w:styleId="Heading2">
+        <w:name w:val="heading 2"/>
+        <w:basedOn w:val="Normal"/>
+        <w:next w:val="Normal"/>
+        <w:qFormat/>
+        <w:pPr>
+          <w:keepNext/>
+          <w:spacing w:before="200" w:after="100"/>
+          <w:outlineLvl w:val="1"/>
+        </w:pPr>
+        <w:rPr>
+          <w:rFonts w:ascii="Garamond" w:hAnsi="Garamond" w:eastAsia="Garamond" w:cs="Garamond"/>
+          <w:b/>
+          <w:bCs/>
+          <w:color w:val="000000"/>
+          <w:sz w:val="24"/>
+          <w:szCs w:val="24"/>
+        </w:rPr>
+      </w:style>
+      <w:style w:type="paragraph" w:styleId="TitlePageTitle">
+        <w:name w:val="Title Page Title"/>
+        <w:basedOn w:val="Normal"/>
+        <w:next w:val="TitlePageAuthor"/>
+        <w:qFormat/>
+        <w:pPr>
+          <w:jc w:val="center"/>
+          <w:spacing w:before="4320" w:after="0"/>
+        </w:pPr>
+        <w:rPr>
+          <w:rFonts w:ascii="Garamond" w:hAnsi="Garamond" w:eastAsia="Garamond" w:cs="Garamond"/>
+          <w:b/>
+          <w:bCs/>
+          <w:color w:val="000000"/>
+          <w:sz w:val="46"/>
+          <w:szCs w:val="46"/>
+        </w:rPr>
+      </w:style>
+      <w:style w:type="paragraph" w:styleId="TitlePageAuthor">
+        <w:name w:val="Title Page Author"/>
+        <w:basedOn w:val="Normal"/>
+        <w:next w:val="Normal"/>
+        <w:qFormat/>
+        <w:pPr>
+          <w:jc w:val="center"/>
+          <w:spacing w:before="1440" w:after="0"/>
+        </w:pPr>
+        <w:rPr>
+          <w:rFonts w:ascii="Garamond" w:hAnsi="Garamond" w:eastAsia="Garamond" w:cs="Garamond"/>
+          <w:b/>
+          <w:bCs/>
+          <w:color w:val="000000"/>
+          <w:sz w:val="22"/>
+          <w:szCs w:val="22"/>
+        </w:rPr>
+      </w:style>
+    </w:styles>
+  XML
+end
+
+def create_default_reference_docx(path, overwrite = false)
+  return if File.exist?(path) && !overwrite
+
+  Dir.mktmpdir("reference_docx") do |dir|
+    FileUtils.mkdir_p(File.join(dir, "_rels"))
+    FileUtils.mkdir_p(File.join(dir, "word", "_rels"))
+    File.write(File.join(dir, "[Content_Types].xml"), default_reference_content_types_xml)
+    File.write(File.join(dir, "_rels", ".rels"), default_reference_root_rels_xml)
+    File.write(File.join(dir, "word", "document.xml"), default_reference_document_xml)
+    File.write(File.join(dir, "word", "styles.xml"), default_reference_styles_xml)
+    File.write(File.join(dir, "word", "settings.xml"), default_reference_settings_xml)
+    File.write(File.join(dir, "word", "_rels", "document.xml.rels"), default_reference_document_rels_xml)
+
+    absolute_path = File.expand_path(path)
+    FileUtils.rm_f(absolute_path)
+    Dir.chdir(dir) do
+      unless system("zip", "-q", "-r", absolute_path, ".")
+        warn "*** WARNING: could not create #{path}; zip command failed"
+      end
+    end
+  end
+end
+
 desc "create a new .rakefile.yaml"
 task :init do
   yaml_file = ".rakefile.yaml"
@@ -383,9 +691,12 @@ task :init do
 :target_files:
   - ./story.txt
 :title: "title goes here"
+:author: "author goes here"
 :target_words: 125000
 :date_start: '#{Date.today}'
 :chapter_head_tag: '** chapter'
+:frontmatter: []
+:docx_reference: .default.docx
 :size_cuttoff_chapter: 600
 :size_cutoff_force_done: 'AAA-chapter-complete'
 # use the tag below to force a chapter to be marked incomplete even if it exceeds the cutoff
@@ -393,7 +704,15 @@ task :init do
 STRING
               )
   end
+  create_default_reference_docx(".default.docx", true)
   puts "created file ./#{yaml_file}"
+  puts "created file ./.default.docx"
+end
+
+desc "create or overwrite the default DOCX reference file"
+task :init_docx do
+  create_default_reference_docx(".default.docx", true)
+  puts "created file ./.default.docx"
 end
 
 
@@ -405,405 +724,346 @@ end
 # with git hash spec:
 #   rake default[047b60168aa7ee1ba2d1d9cd515ddf749ccee8f3]
 #
-desc "generate stats - optionally from a git hash with `rake default[<hashID>]`"
-task :default, [:git_hash] do |t, args|
+def normalize_act_id(act_id)
+  return nil if act_id.nil?
 
-  # --- BOOK SPLIT ANALYSIS LOGIC ---
+  act_id.to_s.strip.sub(/\AAct\s+/i, "").split(":", 2).first.strip.upcase
+end
+
+def act_id_from_line(line)
+  normalize_act_id(line[/^\*\s*Act\s*([^:]+)/i, 1])
+end
+
+def normalize_act_filter(act_filter)
+  return :all if act_filter == :all || act_filter.nil?
+
+  Array(act_filter).map { |act_id| normalize_act_id(act_id) }.compact.to_set
+end
+
+def act_selected?(act_id, normalized_filter)
+  return true if normalized_filter == :all
+
+  normalized_filter.include?(normalize_act_id(act_id))
+end
+
+def chapter_act_id(chapter_num, acts)
+  return nil if acts.empty?
+
+  sorted_acts = acts.sort_by { |act| act[:before_chapter] || 0 }
+  current_act = sorted_acts.select { |act| act[:before_chapter] && chapter_num >= act[:before_chapter] }.last
+  current_act ||= sorted_acts.first
+  act_id_from_line(current_act[:line])
+end
+
+def collect_default_chapters(config, act_filter)
+  normalized_filter = normalize_act_filter(act_filter)
+  chapters = []
   all_data = {}
-  all_acts = {}
-  max_chapter = 0
+  all_act_ids = []
 
   $target_files.each do |file|
     data = parse_chapters_and_acts_from_file(file, config)
     all_data[file] = data
-    all_acts[file] = data[:acts]
-    max_chapter = [max_chapter, data[:chapters].keys.max || 0].max
-  end
 
-  if max_chapter == 0
-    abort "No chapters found in any source files"
-  end
-
-  book_split = config[:book_split] || config["book_split"]
-  if book_split
-    book_split = book_split.transform_keys(&:to_s)
-    book_to_acts = {}
-    book_split.each do |book, acts|
-      book_to_acts[book] = acts.map(&:to_s)
+    data[:acts].each do |act|
+      act_id = act_id_from_line(act[:line])
+      all_act_ids << act_id if act_id && !all_act_ids.include?(act_id)
     end
 
-    # Gather all act names in all input files (in order of appearance)
-    all_act_names = []
-    $target_files.each do |file|
-      all_acts[file].each do |act|
-        act_name = act[:line][/^\*\s*Act\s*([\w\-]+)/i, 1] || act[:line].gsub(/^\*\s*Act\s*/i, '').strip
-        all_act_names << act_name unless all_act_names.include?(act_name)
+    data[:chapters].each do |chap_num, chapter_data|
+      act_id = chapter_act_id(chap_num, data[:acts])
+      next unless act_selected?(act_id, normalized_filter)
+
+      chapters << {
+        :file => file,
+        :chapter_num => chap_num,
+        :act_id => act_id,
+        :text => chapter_data[:full_text]
+      }
+    end
+  end
+
+  { :chapters => chapters, :all_data => all_data, :all_act_ids => all_act_ids }
+end
+
+def default_chapter_done?(text, config)
+  force_done_tag = config[:size_cutoff_force_done] || config[:size_cuttoff_ignore_tag]
+  force_done = force_done_tag && text.match?(force_done_tag)
+  force_incomplete = config[:size_cutoff_force_incomplete] && text.match?(config[:size_cutoff_force_incomplete])
+
+  if force_incomplete
+    false
+  elsif force_done
+    true
+  else
+    text.split.size > $size_cutoff_chapter
+  end
+end
+
+def structural_default_line?(line, chapter_head_tag)
+  line.match?(/^\*\s*Act\s+/i) || line.match?(/^#{Regexp.escape(chapter_head_tag)}\s/i)
+end
+
+def diff_command_for_file(git_hash, file)
+  if git_hash && git_hash.to_s.strip != ""
+    "git diff -U999999 #{git_hash} -- #{file}"
+  else
+    "git diff -U999999 -- #{file}"
+  end
+end
+
+def diff_words_by_act(config, git_hash)
+  chapter_head_tag = config[:chapter_head_tag] || "== chapter"
+  by_act = Hash.new { |h, k| h[k] = { :plus => 0, :minus => 0 } }
+
+  $target_files.each do |file|
+    current_act_id = nil
+    pending_plus = 0
+    pending_minus = 0
+
+    `#{diff_command_for_file(git_hash, file)}`.lines.each do |line|
+      next if line.start_with?("diff --git ", "index ", "--- ", "+++ ", "@@")
+      next if line.start_with?("\\ No newline")
+
+      prefix = line[0]
+      next unless [" ", "+", "-"].include?(prefix)
+
+      content = line[1..-1].to_s.chomp
+
+      if content.match?(/^\*\s*Act\s+/i)
+        current_act_id = act_id_from_line(content)
+        if current_act_id
+          by_act[current_act_id][:plus] += pending_plus
+          by_act[current_act_id][:minus] += pending_minus
+        end
+        pending_plus = 0
+        pending_minus = 0
+        next
+      end
+
+      next if structural_default_line?(content, chapter_head_tag)
+      next unless prefix == "+" || prefix == "-"
+
+      word_count = content.split.size
+      if current_act_id
+        if prefix == "+"
+          by_act[current_act_id][:plus] += word_count
+        else
+          by_act[current_act_id][:minus] += word_count
+        end
+      elsif prefix == "+"
+        pending_plus += word_count
+      else
+        pending_minus += word_count
       end
     end
+  end
 
-    # Validation: every act must be assigned to exactly one book
-    act_to_books = Hash.new { |h, k| h[k] = [] }
-    book_to_acts.each do |book, acts|
-      acts.each { |act| act_to_books[act] << book }
+  by_act
+end
+
+def diff_word_totals_for_filter(config, git_hash, act_filter)
+  normalized_filter = normalize_act_filter(act_filter)
+  by_act = diff_words_by_act(config, git_hash)
+  selected = by_act.select { |act_id, _counts| act_selected?(act_id, normalized_filter) }
+  words_plus = selected.values.sum { |counts| counts[:plus] }
+  words_minus = selected.values.sum { |counts| counts[:minus] }
+
+  { :plus => words_plus, :minus => words_minus, :by_act => selected }
+end
+
+def diff_word_count_for_file(git_hash, file)
+  plus = 0
+  minus = 0
+
+  `#{diff_command_for_file(git_hash, file)}`.lines.each do |line|
+    next if line.start_with?("diff --git ", "index ", "--- ", "+++ ", "@@")
+
+    if line.start_with?("+")
+      plus += line[1..-1].to_s.split.size
+    elsif line.start_with?("-")
+      minus += line[1..-1].to_s.split.size
     end
-    missing_acts = all_act_names.uniq - act_to_books.keys
-    unless missing_acts.empty?
-      abort "*** ERROR: The following acts are not assigned to any book in book_split: #{missing_acts.join(', ')}"
+  end
+
+  { :plus => plus, :minus => minus }
+end
+
+def marker_count_summary(text, marker)
+  text.scan(/\b#{Regexp.escape(marker)}\b/).size
+end
+
+def print_default_summary(label, config, target_words, stats)
+  percent_words = stats[:percent_words]
+  percent_chapters = stats[:percent_chapters]
+  expansion_words = stats[:expansion_words]
+  words_delta = stats[:words_plus] - stats[:words_minus]
+
+  puts ""
+  puts "  +--------------------"
+  puts "  | #{label}"
+  puts "  |"
+  puts "  | story :    #{stats[:actual_words].commify} / #{target_words&.commify}  words ( #{sprintf('%0.2f', percent_words * 100)} % )"
+  puts "  |            #{stats[:actual_words] / $words_per_page} / #{target_words / $words_per_page}  pages"
+  puts "  |            #{stats[:actual_chapters]} / #{stats[:target_chapters]} chapters ( #{sprintf('%0.2f', percent_chapters * 100)} % )"
+  puts "  | "
+  puts "  |            expansion ratio: #{sprintf('%2.2f', stats[:expansion_ratio])}"
+  puts "  |            words at this ratio: #{expansion_words.commify}"
+  puts "  |            pages at this ratio: #{(expansion_words / $words_per_page).commify}"
+  puts "  |"
+  puts "  |            #{stats[:actual_words].commify} / #{expansion_words.commify} words at this ratio ( #{sprintf('%0.2f', stats[:expansion_progress] * 100)} % )"
+  puts "  |            #{(stats[:actual_words] / $words_per_page).commify} / #{(expansion_words / $words_per_page).commify} pages at this ratio"
+  puts "  | "
+
+  if stats[:revised_words] > 0
+    puts "  | revision:"
+    puts "  |   revised:           #{stats[:revised_words].commify} / #{stats[:actual_words].commify} words ( #{sprintf('%0.2f', stats[:revised_fraction] * 100)} % )"
+    puts "  | "
+  end
+
+  [:XXX, :YYY, :ZZZ].each do |marker|
+    count = stats[:marker_counts][marker]
+    puts "  | #{marker.to_s.downcase}:                #{count}" if count > 0
+  end
+
+  if stats[:show_unused_delta]
+    puts "  | moved to unused:    #{stats[:unused_delta] > 0 ? "+" : ""}#{stats[:unused_delta].commify}"
+    puts "  | "
+  end
+
+  puts "  | today's word delta: #{words_delta > 0 ? "+" : ""}#{words_delta.commify}   (+#{stats[:words_plus].commify} -#{stats[:words_minus].commify})"
+
+  if stats[:diff_by_act].size > 1
+    puts "  | act deltas:"
+    stats[:diff_by_act].keys.sort.each do |act_id|
+      counts = stats[:diff_by_act][act_id]
+      delta = counts[:plus] - counts[:minus]
+      next if delta == 0 && counts[:plus] == 0 && counts[:minus] == 0
+
+      puts "  |   #{act_id}: #{delta > 0 ? "+" : ""}#{delta.commify}   (+#{counts[:plus].commify} -#{counts[:minus].commify})"
     end
-    multi_books = act_to_books.select { |act, books| books.size > 1 }
-    unless multi_books.empty?
-      msg = multi_books.map { |act, books| "Act '#{act}' assigned to multiple books: #{books.join(', ')}" }.join("\n  ")
-      abort "*** ERROR: The following acts are assigned to multiple books in book_split:\n  #{msg}"
+  end
+
+  puts "  | days since start:   #{stats[:days_since_start]}"
+  puts "  | average rate:       #{stats[:write_rate].commify} words / day"
+  puts "  | to go:              #{stats[:to_go_words].commify} words ;  #{stats[:to_go_days].commify} days ( #{(Date.today + stats[:to_go_days]).strftime('%d %b %Y')} )"
+  puts "  | to go (expansion):  #{stats[:to_go_words_expansion].commify} words ;  #{stats[:to_go_days_expansion].commify} days ( #{(Date.today + stats[:to_go_days_expansion]).strftime('%d %b %Y')} )"
+  puts "  +--------------------"
+  puts ""
+end
+
+def validate_book_split_acts!(book_to_acts, all_act_ids)
+  act_to_books = Hash.new { |h, k| h[k] = [] }
+  book_to_acts.each do |book, acts|
+    acts.each { |act| act_to_books[normalize_act_id(act)] << book }
+  end
+
+  missing_acts = all_act_ids.map { |act| normalize_act_id(act) }.uniq - act_to_books.keys
+  unless missing_acts.empty?
+    abort "*** ERROR: The following acts are not assigned to any book in book_split: #{missing_acts.join(', ')}"
+  end
+
+  multi_books = act_to_books.select { |_act, books| books.size > 1 }
+  unless multi_books.empty?
+    msg = multi_books.map { |act, books| "Act '#{act}' assigned to multiple books: #{books.join(', ')}" }.join("\n  ")
+    abort "*** ERROR: The following acts are assigned to multiple books in book_split:\n  #{msg}"
+  end
+end
+
+def default_internal(config, args, unused_file, target_words, act_filter = :all, label = nil, allow_book_split = true)
+  book_split = config[:book_split] || config["book_split"]
+  if allow_book_split && act_filter == :all && book_split
+    collected = collect_default_chapters(config, :all)
+    book_to_acts = book_split.transform_keys(&:to_s).transform_values do |acts|
+      acts.map { |act| normalize_act_id(act) }
     end
 
-    selected_books = if ENV['BOOK']
-      [ENV['BOOK'].to_s]
+    validate_book_split_acts!(book_to_acts, collected[:all_act_ids])
+
+    selected_books = if ENV["BOOK"]
+      [ENV["BOOK"].to_s]
     else
       book_to_acts.keys
     end
 
     selected_books.each do |book|
-      acts_for_book = book_to_acts[book]
-      # Filter acts and chapters for this book
-      filtered_all_data = {}
-      filtered_all_acts = {}
-      filtered_target_files = []
-      $target_files.each do |file|
-        acts = all_acts[file].select do |act|
-          act_name = act[:line][/^\*\s*Act\s*([\w\-]+)/i, 1] || act[:line].gsub(/^\*\s*Act\s*/i, '').strip
-          acts_for_book.include?(act_name)
-        end
-        next if acts.empty?
-        filtered_all_acts[file] = acts
-        # Filter chapters to only those belonging to the selected acts
-        chapters = all_data[file][:chapters].select do |chap_num, chap_data|
-          # Find which act this chapter belongs to
-          act_idx = all_acts[file].rindex { |a| a[:before_chapter] && chap_num >= a[:before_chapter] }
-          if act_idx
-            act_name = all_acts[file][act_idx][:line][/^\*\s*Act\s*([\w\-]+)/i, 1] || all_acts[file][act_idx][:line].gsub(/^\*\s*Act\s*/i, '').strip
-            acts_for_book.include?(act_name)
-          else
-            false
-          end
-        end
-        filtered_all_data[file] = all_data[file].merge(:acts => acts, :chapters => chapters)
-        filtered_target_files << file
-      end
+      abort "*** ERROR: Unknown book '#{book}' in BOOK" unless book_to_acts.key?(book)
 
-      # Compute stats for this book (only from acts present in this book)
-      actual_words = 0
-      done_chapters = 0
-      total_chapters = 0
-      filtered_all_data.each do |file, data|
-        data[:chapters].each do |chap_num, chap_data|
-          text = chap_data[:full_text]
-          word_count = text.split.size
-          actual_words += word_count
-          total_chapters += 1
-          force_done_tag = config[:size_cutoff_force_done] || config[:size_cuttoff_ignore_tag]
-          force_done = force_done_tag && text.match?(force_done_tag)
-          force_incomplete = config[:size_cutoff_force_incomplete] && text.match?(config[:size_cutoff_force_incomplete])
-          is_done = if force_incomplete
-            false
-          elsif force_done
-            true
-          else
-            word_count > $size_cutoff_chapter
-          end
-          done_chapters += 1 if is_done
-        end
-      end
-      actual_chapters = done_chapters
-      target_chapters = total_chapters
-      percent_words = ($target_words && $target_words > 0) ? (actual_words * 1.0 / $target_words) : 0.0
-      percent_chapters = (target_chapters > 0) ? (actual_chapters * 1.0 / target_chapters) : 0.0
-      expansion_words = ($target_words * percent_words / (percent_chapters.nonzero? || 1)).floor rescue 0
-
-      # Compute words added/removed for this book (git diff), only for chapters in acts for this book
-      words_minus = 0
-      words_plus = 0
-      filtered_target_files.each do |file|
-        # Get the set of chapter numbers for this file and book
-        book_chapnums = filtered_all_data[file][:chapters].keys
-        chapter_head_tag = config[:chapter_head_tag] || "== chapter"
-        # Use -U999999 to get all context lines, so chapter headings are always present
-        diff_lines = `git diff -U999999 #{args[:git_hash]} #{file}`.lines
-        current_chapnum = nil
-        diff_lines.each do |line|
-          # Detect chapter heading in context
-          if line.match?(/^[- +]*#{Regexp.escape(chapter_head_tag)}.*?(\d+)/)
-            current_chapnum = $1.to_i rescue nil
-          end
-          # Only count words for chapters in this book
-          if (line.start_with?("-") || line.start_with?("+")) && book_chapnums.include?(current_chapnum)
-            if line.start_with?("-")
-              words_minus += line[1..-1].split.size
-            elsif line.start_with?("+")
-              words_plus += line[1..-1].split.size
-            end
-          end
-        end
-      end
-      words_delta = words_plus - words_minus
-
-      puts ""
-      puts "+--------------------"
-      puts "| #{book}"
-      puts "|"
-      puts "| story :    #{actual_words.commify} / #{$target_words&.commify}  words ( #{sprintf('%0.2f', percent_words * 100)} % )"
-      puts "|            #{actual_words / $words_per_page} / #{$target_words / $words_per_page}  pages"
-      puts "|            #{actual_chapters} / #{target_chapters} chapters ( #{sprintf('%0.2f', percent_chapters * 100)} % )"
-      puts "| "
-      puts "|            expansion ratio: #{sprintf('%2.2f', percent_words / (percent_chapters.nonzero? || 1))}"
-      puts "|            words at this ratio: #{ expansion_words.commify}"
-      puts "|            pages at this ratio: #{ (expansion_words / $words_per_page).commify}"
-      puts "|"
-      puts "|            #{actual_words.commify} / #{expansion_words.commify} words at this ratio ( #{sprintf('%0.2f', (actual_words * 1.0 / (expansion_words.nonzero? || 1) * 100))} % )"
-      puts "|            #{(actual_words / $words_per_page).commify} / #{(expansion_words / $words_per_page).commify} pages at this ratio"
-      puts "| "
-      puts "|            today's word delta: #{words_delta > 0 ? "+" : ""}#{words_delta.commify}   (+#{words_plus.commify} -#{words_minus.commify})"
-      puts "| "
-
-      # ASCII art progress graph for this book
-      # --- ASCII ART BARGRAPH: only show acts present in this book ---
-      # Build act/chapter structure for acts present in this book only
-      act_to_idx = {}
-      act_names = []
-      act_to_chapnums = Hash.new { |h, k| h[k] = Set.new }
-      filtered_all_acts.values.each do |acts|
-        acts.each do |act|
-          act_line = act[:line]
-          act_name = act_line[/^\*\s*Act\s*([\w\-]+)/i, 1] || act_line.gsub(/^\*\s*Act\s*/i, '').strip
-          unless act_to_idx.key?(act_name)
-            act_to_idx[act_name] = act_names.size
-            act_names << act_name
-          end
-        end
-      end
-      filtered_all_data.each do |file, data|
-        acts = filtered_all_acts[file]
-        chapters = data[:chapters]
-        chapters.each do |chap_num, chap_data|
-          acts_by_chap = acts.map { |a| a[:before_chapter] }
-          idx = acts_by_chap.rindex { |n| n && chap_num >= n } || 0
-          act_name = (acts[idx][:line][/^\*\s*Act\s*([\w\-]+)/i, 1] || acts[idx][:line].gsub(/^\*\s*Act\s*/i, '').strip)
-          act_to_chapnums[act_name] << chap_num
-        end
-      end
-      act_chapnums_sorted = act_names.map { |act_name| act_to_chapnums[act_name].to_a.sort }
-      # Step 3: Calculate act paddings for header and bars (only for acts in this book)
-      act_starts = []
-      act_widths = act_chapnums_sorted.map(&:size)
-      pos = 0
-      act_widths.each do |w|
-        act_starts << pos
-        pos += w + 1
-      end
-      pos -= 1 if pos > 0
-      min_spacing = 3
-      act_bar_pads = Array.new(act_names.size, 0)
-      act_name_positions = [0]
-      act_names.each_with_index do |name, idx|
-        next if idx == 0
-        prev_end = act_name_positions[idx-1] + act_names[idx-1].length
-        needed = act_starts[idx] - prev_end
-        if needed < min_spacing
-          pad = min_spacing - needed
-          act_starts[idx..-1].each_with_index { |v, j| act_starts[idx+j] += pad }
-          pos += pad
-          act_bar_pads[idx-1] += pad
-        end
-        act_name_positions << act_starts[idx]
-      end
-      max_filename_len = filtered_target_files.map { |f| File.basename(f).length }.max
-      header = ' ' * (max_filename_len + 2)
-      act_names.each_with_index do |name, idx|
-        header = header.ljust(act_name_positions[idx] + max_filename_len + 2)
-        header[act_name_positions[idx] + max_filename_len + 2, name.length] = name
-      end
-      puts header.rstrip
-      lines = []
-      filtered_target_files.each do |file|
-        acts = filtered_all_acts[file]
-        chapters = filtered_all_data[file][:chapters]
-        # For each act, for each possible chapter, show =/- if present, space if missing
-        bar = '|'
-        act_segments = []
-        act_names.each_with_index do |act_name, act_idx|
-          chapnums = act_chapnums_sorted[act_idx]
-          # Get all chapters for this act in this file, in order
-          file_chapnums = chapnums.select { |chap_num| chapters[chap_num] }
-          seg = ''
-          file_chapnums.each do |chap_num|
-            chap_data = chapters[chap_num]
-            text = chap_data[:full_text]
-            word_count = text.split.size
-            force_done_tag = config[:size_cutoff_force_done] || config[:size_cuttoff_ignore_tag]
-            force_done = force_done_tag && text.match?(force_done_tag)
-            force_incomplete = config[:size_cutoff_force_incomplete] && text.match?(config[:size_cutoff_force_incomplete])
-            is_done = if force_incomplete
-              false
-            elsif force_done
-              true
-            else
-              word_count > $size_cutoff_chapter
-            end
-            seg << (is_done ? "=" : "-")
-          end
-          # Pad with spaces to the right to fill the act's width
-          seg = seg.ljust(act_widths[act_idx])
-          act_segments << seg
-        end
-        # Build the bar from left-aligned, fixed-width segments
-        bar = '|'
-        act_segments.each_with_index do |seg, act_idx|
-          bar << seg
-          bar << ' ' * act_bar_pads[act_idx] + '|' if act_idx < act_names.size - 1
-        end
-        bar = bar.ljust(pos)
-        fname = File.basename(file).ljust(max_filename_len)
-        lines << "#{fname}  #{bar}"
-      end
-      lines.each { |l| puts l.rstrip }
-      puts ""
+      default_internal(config, args, unused_file, target_words, book_to_acts[book], book, false)
     end
-    exit 0
-  end
-  # --- END BOOK SPLIT ANALYSIS LOGIC ---
-  # words_minus = cat_prev_str.split.size - cat_str.split.size
-  # words_plus = cat_str.split.size - cat_prev_str.split.size
-  # words_delta = words_plus - words_minus
-
-  # unused_minus = File.exist?(unused_file) ? File.read(unused_file).split.size : 0
-  # unused_plus = unused_minus # Adjust logic if needed
-  # unused_delta = unused_plus - unused_minus
-
-  # XXX this is wrong ; doesn't work when a hash is passed in
-  words_minus      = 0
-  words_plus       = 0
-  $target_files.each do |file|
-    words_minus += `git diff  #{args[:git_hash]} #{file}  | grep "^\-" | wc -w`.to_i
-    words_plus  += `git diff  #{args[:git_hash]} #{file}  | grep "^\+" | wc -w`.to_i
-  end
-  words_delta      = words_plus - words_minus
-
-  unused_minus      = `git diff  #{args[:git_hash]} #{unused_file}  | grep "^\-" | wc -w`.to_i
-  unused_plus       = `git diff  #{args[:git_hash]} #{unused_file}  | grep "^\+" | wc -w`.to_i
-  unused_delta      = unused_plus - unused_minus
-
-  
-  if verbose
-
-    puts "words_minus #{words_minus}"
-    puts "words_plus #{words_plus}"
-
+    return
   end
 
-  # XXX this is wrong ; doesn't work when a hash is passed in
-  revised_words_before = cat_prev_str.split(/\s+/).index { |word| word.match?(/^<--+/) } || 0
-  revised_words = cat_str.split(/\s+/).index { |word| word.match?(/^<--+/) } || 0
-  puts "revised_words = #{revised_words}"
-  revised_words_delta = revised_words - revised_words_before
-  
-  revised_fraction = revised_words * 1.0 / actual_words
-  revised_words_delta_fraction = revised_words_delta * 1.0 / actual_words
+  collected = collect_default_chapters(config, act_filter)
+  chapters = collected[:chapters]
+  abort "No chapters found in selected acts" if chapters.empty?
 
-  
-  if revised_words > 0
-    puts "config[:revise_start_str] = #{config[:revise_start_str]}"
-    revise_start_str = config[:revise_start_date] || `git log -G "<--" --follow --  story.txt | tac | grep "Date:" | head -1 | cut -d: -f2-5`
-    puts "* revise_start_str = `#{revise_start_str}`"
-    if revise_start_str && revise_start_str != ""
-      revise_start_date = Date.parse(revise_start_str)
-    else
-      revise_start_date = Date.today
-    end
-	puts "* revise_start_date = #{revise_start_date}"
-    days_since_start = (Date.today - revise_start_date).to_i
-    days_since_start = 1 if days_since_start == 0
-	puts "* days_since_start = #{days_since_start}"
-    revise_rate      = (revised_words / days_since_start ).to_i || 1
-    revise_rate      = 100 if revise_rate == 0
-	puts "revise_rate = #{revise_rate.inspect}"
-    to_revise_words  = actual_words - revised_words
-    to_go_days       = to_revise_words / revise_rate
+  text = chapters.map { |chapter| chapter[:text] }.join("\n")
+  actual_words = text.split.size
+  target_chapters = chapters.size
+  actual_chapters = chapters.count { |chapter| default_chapter_done?(chapter[:text], config) }
+  percent_words = (target_words && target_words > 0) ? (actual_words * 1.0 / target_words) : 0.0
+  percent_chapters = target_chapters > 0 ? (actual_chapters * 1.0 / target_chapters) : 0.0
+  expansion_ratio = percent_chapters > 0 ? (percent_words / percent_chapters) : 0.0
+  expansion_words = percent_chapters > 0 ? (target_words * expansion_ratio).floor : 0
+  expansion_progress = expansion_words > 0 ? (actual_words * 1.0 / expansion_words) : 0.0
+
+  date_start = Date.parse(config[:date_start].to_s) rescue Date.today
+  days_since_start = [(Date.today - date_start).to_i, 1].max
+  write_rate = [actual_words / days_since_start, 1].max
+  to_go_words = [target_words - actual_words, 0].max
+  to_go_days = to_go_words / write_rate
+  to_go_words_expansion = [expansion_words - actual_words, 0].max
+  to_go_days_expansion = to_go_words_expansion / write_rate
+
+  revised_words = text.split(/\s+/).index { |word| word.match?(/^<--+/) } || 0
+  revised_fraction = actual_words > 0 ? (revised_words * 1.0 / actual_words) : 0.0
+
+  diff_counts = diff_word_totals_for_filter(config, args[:git_hash], act_filter)
+  unused_delta = 0
+  show_unused_delta = act_filter == :all
+  if show_unused_delta && File.exist?(unused_file)
+    unused_counts = diff_word_count_for_file(args[:git_hash], unused_file)
+    unused_delta = unused_counts[:plus] - unused_counts[:minus]
   end
 
-  expansion_words = (target_words * percent_words / percent_chapters).floor
-  to_go_words_expansion      = expansion_words - actual_words
-  to_go_days_expansion       = to_go_words_expansion / write_rate
+  marker_counts = {
+    :XXX => marker_count_summary(text, "XXX"),
+    :YYY => marker_count_summary(text, "YYY"),
+    :ZZZ => marker_count_summary(text, "ZZZ")
+  }
 
-  
+  stats = {
+    :actual_words => actual_words,
+    :actual_chapters => actual_chapters,
+    :target_chapters => target_chapters,
+    :percent_words => percent_words,
+    :percent_chapters => percent_chapters,
+    :expansion_ratio => expansion_ratio,
+    :expansion_words => expansion_words,
+    :expansion_progress => expansion_progress,
+    :revised_words => revised_words,
+    :revised_fraction => revised_fraction,
+    :marker_counts => marker_counts,
+    :unused_delta => unused_delta,
+    :show_unused_delta => show_unused_delta,
+    :words_plus => diff_counts[:plus],
+    :words_minus => diff_counts[:minus],
+    :diff_by_act => diff_counts[:by_act],
+    :days_since_start => days_since_start,
+    :write_rate => write_rate,
+    :to_go_words => to_go_words,
+    :to_go_days => to_go_days,
+    :to_go_words_expansion => to_go_words_expansion,
+    :to_go_days_expansion => to_go_days_expansion
+  }
 
-
-# Move print_progress_summary above :graph task
-def print_progress_summary(title, actual_words, target_words, words_per_page, actual_chapters, target_chapters, percent_words, percent_chapters, expansion_words)
-  puts ""
-  puts "  +--------------------"
-  puts "  | #{title}"
-  puts "  |"
-  puts "  | story :    #{actual_words.commify} / #{target_words&.commify}  words ( #{sprintf('%0.2f', percent_words * 100)} % )"
-  puts "  |            #{actual_words / words_per_page} / #{target_words / words_per_page}  pages"
-  puts "  |            #{actual_chapters} / #{target_chapters} chapters ( #{sprintf('%0.2f', percent_chapters * 100)} % )"
-  puts "  | "
-  puts "  |            expansion ratio: #{sprintf('%2.2f', percent_words / percent_chapters)}"
-  puts "  |            words at this ratio: #{ expansion_words.commify}"
-  puts "  |            pages at this ratio: #{ (expansion_words / words_per_page).commify}"
-  puts "  |"
-  puts "  |            #{actual_words.commify} / #{expansion_words.commify} words at this ratio ( #{sprintf('%0.2f', (actual_words * 1.0 / expansion_words * 100))} % )"
-  puts "  |            #{(actual_words / words_per_page).commify} / #{(expansion_words / words_per_page).commify} pages at this ratio"
-  puts "  | "
+  print_default_summary(label || config[:title] || $title, config, target_words, stats)
 end
-    # Print progress summary at the top
-    # Reuse logic from default task
-    cat_str = get_target_content($target_files)
-    actual_words = cat_str.split.size
-    percent_words = ($target_words && $target_words > 0) ? (actual_words * 1.0 / $target_words) : 0.0
-    # For chapters, reuse logic from get_chapter_hash
-    ch_hash = get_chapter_hash(config, nil)
-    actual_chapters = ch_hash[:done]
-    target_chapters = ch_hash[:done] + ch_hash[:notdone]
-    percent_chapters = (target_chapters > 0) ? (actual_chapters * 1.0 / target_chapters) : 0.0
-    expansion_words = ($target_words * percent_words / percent_chapters).floor rescue 0
-    print_progress_summary($title, actual_words, $target_words, $words_per_page, actual_chapters, target_chapters, percent_words, percent_chapters, expansion_words)
-  
-  # draft 2 - use the '<---' flag
-  if revised_words > 0
-    puts "  | revision:"
-    puts "  |   today's revision:  #{revised_words_delta > 0 ? "+" : ""}#{revised_words_delta.commify} words (#{revised_words_delta > 0 ? "+" : ""}#{sprintf('%0.2f',revised_words_delta_fraction * 100)} %)"
-    puts "  |   days since start:  #{days_since_start}"
-    puts "  |   average rate:      #{revise_rate.commify} words / day"
-    puts "  |   revised:           #{revised_words.commify} / #{actual_words.commify} words ( #{sprintf('%0.2f', revised_fraction * 100)} % )"
-    puts "  |   to go:             #{to_revise_words.commify} words ;  #{to_go_days.commify} days ( #{(Date.today + to_go_days).strftime('%d %b %Y')} )"
-    puts "  | "    
 
-  end 
-
-  if ( xxx_count_now > 0 || xxx_count_prev > 0)
-    puts "  | xxx:                #{xxx_count_now} (#{xxx_diff_str})"
-  end
-  if ( yyy_count_now > 0 || yyy_count_prev > 0)
-    puts "  | yyy:                #{yyy_count_now} (#{yyy_diff_str})"
-  end
-  if ( zzz_count_now > 0 || zzz_count_prev > 0)
-    puts "  | zzz:                #{zzz_count_now} (#{zzz_diff_str})"
-  end
-  
-  puts "  | moved to unused:    #{words_delta > 0 ? "+" : ""}#{unused_delta.commify}"
-  puts "  | "
-  puts "  | today's word delta: #{words_delta > 0 ? "+" : ""}#{words_delta.commify}   (+#{words_plus.commify} -#{words_minus.commify})"
-  puts "  | days since start:   #{days_since_start}"
-  puts "  | average rate:       #{write_rate.commify} words / day"
-  if revised_words == 0
-    puts "  | to go:              #{to_go_words.commify} words ;  #{to_go_days.commify} days ( #{(Date.today + to_go_days).strftime('%d %b %Y')} )"
-    puts "  | to go (expansion):  #{to_go_words_expansion.commify} words ;  #{to_go_days_expansion.commify} days ( #{(Date.today + to_go_days_expansion).strftime('%d %b %Y')} )"
-  end
-
-  puts "  +--------------------"
-  puts ""
-
-
-
+desc "generate stats - optionally from a git hash with `rake default[<hashID>]`"
+task :default, [:git_hash] do |t, args|
+  default_internal(config, args, unused_file, target_words)
 end
 
 # Helper: build stats used by other tasks (commit message generation)
@@ -813,6 +1073,184 @@ def build_basic_stats(git_hash = nil)
   # use global $target_words (guard for nil/0)
   percent_words = ($target_words && $target_words > 0) ? (actual_words * 1.0 / $target_words) : 0.0
   { :actual_words => actual_words, :percent_words => percent_words }
+end
+
+WORD_GRAPH_CACHE_VERSION = 1
+
+def git_file_content_at_commit(git_hash, file)
+  [file, file.sub(%r{\A\./+}, "")].uniq.each do |path|
+    git_ref = "#{git_hash}:#{path}"
+    next unless system("git", "cat-file", "-e", git_ref, out: File::NULL, err: File::NULL)
+
+    return `git show #{Shellwords.escape(git_ref)}`
+  end
+
+  ""
+end
+
+def target_files_from_config(config_hash)
+  if config_hash[:target_files] || config_hash["target_files"]
+    config_hash[:target_files] || config_hash["target_files"]
+  elsif config_hash[:target_file] || config_hash["target_file"]
+    [config_hash[:target_file] || config_hash["target_file"]]
+  else
+    ["story.txt"]
+  end
+end
+
+def config_at_commit(git_hash, fallback_config)
+  contents = git_file_content_at_commit(git_hash, ".rakefile.yaml")
+  return fallback_config if contents.strip == ""
+
+  YAML.load(contents) || fallback_config
+rescue
+  fallback_config
+end
+
+def target_content_at_commit(git_hash, target_files)
+  target_files.map { |file| git_file_content_at_commit(git_hash, file) }.join
+end
+
+def fresh_word_graph_cache
+  {
+    "version" => WORD_GRAPH_CACHE_VERSION,
+    "commits" => {}
+  }
+end
+
+def word_graph_cache_path
+  path = `git rev-parse --git-path word_graph_cache.yml 2>/dev/null`.strip
+  path.empty? ? ".word_graph_cache.yml" : path
+end
+
+def load_word_graph_cache
+  path = word_graph_cache_path
+  return fresh_word_graph_cache unless File.exist?(path)
+
+  cache = YAML.load_file(path) || {}
+  return fresh_word_graph_cache unless cache["version"] == WORD_GRAPH_CACHE_VERSION
+  return fresh_word_graph_cache unless cache["commits"].is_a?(Hash)
+
+  cache
+rescue
+  fresh_word_graph_cache
+end
+
+def save_word_graph_cache(cache)
+  path = word_graph_cache_path
+  FileUtils.mkdir_p(File.dirname(path))
+  temp_path = "#{path}.tmp.#{$$}"
+  File.write(temp_path, cache.to_yaml)
+  File.rename(temp_path, path)
+rescue => e
+  warn "WARNING: could not write word_graph cache at #{path}: #{e.message}"
+ensure
+  File.delete(temp_path) if temp_path && File.exist?(temp_path)
+end
+
+def word_count_at_commit(git_hash, config, cache)
+  cached = cache["commits"][git_hash]
+  return cached["words"] if cached.is_a?(Hash) && cached.key?("words")
+
+  commit_config = config_at_commit(git_hash, config)
+  target_files = target_files_from_config(commit_config)
+  words = target_content_at_commit(git_hash, target_files).split.size
+  cache["commits"][git_hash] = { "words" => words }
+  words
+end
+
+def word_graph_start_date(config)
+  Date.parse(config[:date_start].to_s).to_s
+rescue
+  nil
+end
+
+def word_history_points(config)
+  history = []
+  cache = load_word_graph_cache
+  start_date = word_graph_start_date(config)
+  since_arg = start_date ? "--since=#{start_date} 00:00:00" : nil
+  git_log_args = ["git", "log", "--reverse", "--date=short", "--format=%H%x09%ad"]
+  git_log_args << since_arg if since_arg
+  lines = `#{git_log_args.map { |arg| Shellwords.escape(arg) }.join(' ')}`
+  lines.each_line do |line|
+    hash, date = line.chomp.split("\t", 2)
+    next unless hash && date
+
+    history << [date, word_count_at_commit(hash, config, cache)]
+  end
+
+  save_word_graph_cache(cache)
+
+  points = history.each_with_object({}) do |(date, words), by_date|
+    by_date[date] = words
+  end.map { |date, words| [date, words] }.sort_by(&:first)
+
+  if start_date && !points.empty? && points.first.first != start_date
+    points.unshift([start_date, 0])
+  end
+
+  points
+end
+
+def sample_points(points, width)
+  return points if points.size <= width
+
+  (0...width).map do |idx|
+    source_idx = (idx * (points.size - 1).to_f / (width - 1)).round
+    points[source_idx]
+  end
+end
+
+def render_word_graph(points, width = 60, height = 12)
+  return ["No git history found for target files."] if points.empty?
+
+  sampled = sample_points(points, width)
+  words = sampled.map(&:last)
+  min_words = words.min
+  max_words = words.max
+  span = [max_words - min_words, 1].max
+  grid = Array.new(height) { Array.new(sampled.size, " ") }
+
+  sampled.each_with_index do |(_date, word_count), idx|
+    row = height - 1 - ((word_count - min_words) * (height - 1) / span.to_f).round
+    grid[row][idx] = "*"
+  end
+
+  lines = grid.each_with_index.map do |row, idx|
+    label_value = max_words - (idx * span / [height - 1, 1].max.to_f).round
+    "#{sprintf('%7s', label_value.commify)} | #{row.join}"
+  end
+
+  lines << "        +#{"-" * (sampled.size + 1)}"
+  lines << "         #{sampled.first.first}#{sampled.size > 12 ? ' ' * [sampled.size - 20, 1].max : '  '}#{sampled.last.first}"
+  lines
+end
+
+def print_word_graph(points)
+  abort "No git history found for target files" if points.empty?
+
+  puts ""
+  puts "  +--------------------"
+  puts "  | #{$title} word history"
+  puts "  |"
+  render_word_graph(points).each { |line| puts "  | #{line}" }
+  first_date, first_words = points.first
+  last_date, last_words = points.last
+  days = [(Date.parse(last_date) - Date.parse(first_date)).to_i, 1].max
+  delta = last_words - first_words
+  puts "  |"
+  puts "  | #{first_date}: #{first_words.commify} words"
+  puts "  | #{last_date}: #{last_words.commify} words"
+  puts "  | net: #{delta >= 0 ? '+' : ''}#{delta.commify} words"
+  puts "  | avg: #{(delta / days).commify} words/day"
+  puts "  +--------------------"
+  puts ""
+end
+
+desc "Show ASCII graph of total words over git history"
+task :word_graph do
+  print_word_graph(word_history_points(config))
 end
 
 # Build commit message reusing the same formatting as the default output
@@ -874,81 +1312,16 @@ task :ch, [:git_hash] do |t, args|
   Rake::Task[:chapters].invoke(args.values)
 end
 
+desc "show verbose chapter stats, hiding completed chapters"
+task :chv, [:git_hash] do |t, args|
+  ret = get_chapter_hash(config, args[:git_hash])
+  print_chapter_report(title, config, ret, $target_files, nil, false, true)
+end
+
 desc "generate verbose stats about chapters"
 task :chapters, [:git_hash] do |t, args|
-  puts "args = #{args.inspect}"
   ret           = get_chapter_hash(config, args[:git_hash])
-
-  done           = ret[:done]
-  notdone        = ret[:notdone]
-  avg            = ret[:avg]
-  chapter_words  = ret[:chapter_words]
-  chapter_titles = ret[:chapter_titles]
-  std_dev        = ret[:std_dev]
-  arrows         = ret[:chapter_arrows]
-  chapter_done   = ret[:chapter_done]
-  chapter_file   = ret[:chapter_file]
-  chapter_global_num = ret[:chapter_global_num]
-
-  puts ""
-  puts "  +--------------------"
-  puts "  | #{title}"
-  puts "  | "
-  puts "  |  ch                                             words      stddevs"
-  puts "  |  ---------------------------------------------------------------"
-  
-  $target_files.each do |file|
-    puts "  | #{file}"
-    
-    # Parse acts for this file to track act boundaries
-    file_data = parse_chapters_and_acts_from_file(file, config)
-    acts_by_chapter = {}
-    file_data[:acts].each do |act_info|
-      before_ch = act_info[:before_chapter]
-      act_line = act_info[:line]
-      acts_by_chapter[before_ch] = act_line
-    end
-    
-    last_act = nil
-    chapter_words.each_pair do |key, words|
-      next unless chapter_file[key] == file
-      
-      ch_num = chapter_global_num[key]
-      
-      # Check if there's an act transition at this chapter
-      if acts_by_chapter[ch_num]
-        current_act = acts_by_chapter[ch_num]
-        # Extract act name (e.g., "Act 2-A" from "* Act 2-A")
-        if current_act =~ /\* (Act .+)/
-          current_act_name = $1
-        else
-          current_act_name = current_act
-        end
-        
-        # Print separator if act changed and it's not the first act or it's transitioning from Act 1
-        if last_act && current_act_name != last_act && current_act_name != "Act 1"
-          puts "  | --- #{current_act_name}"
-        end
-        last_act = current_act_name
-      end
-      
-      sigma = std_dev == 0.0 ? 0 : ((words - avg).abs / std_dev).floor
-      ch_done  = chapter_done[key] ? "✓" : " " 
-      puts "  | #{sprintf('%3i', ch_num) }  #{ch_done} #{sprintf('%-38s', chapter_titles[key][0...38])} #{sprintf('%6s',words.commify)}    #{ sprintf('%5s',(words > avg ? "+":"-") * sigma)}     #{arrows[key] ? "<--" : ""}"
-    end
-    puts "  | ----------"
-  end
-
-  
-  puts "  |\n"
-  puts "  |\n"
-  puts "  | * #{done} chapters done, avg words = #{avg.commify}"
-  puts "  | * stddev = #{std_dev.floor.commify}"
-  puts "  | * #{notdone} chapters not done"
-  puts "  | * target words @ this rate = #{ ((chapter_words.size * avg) ).commify}"
-  puts "  | * target pages @ this rate = #{ ((chapter_words.size * avg) / 250).commify}"
-  puts "  +--------------------"
-  puts ""
+  print_chapter_report(title, config, ret)
 end
 
 task :clean do |t|
@@ -960,10 +1333,6 @@ task :clean do |t|
   
   system("rm", "-f", *Dir.glob("#*#"))  
 end
-
-# task :todo do |t|
-#   puts `cat #{outline_file}  | grep "* ============== 2A" -B 100000 | grep "\\(^\*\\|TODO\\)" `
-# end
 
 task :outlines do |t|
   subdir = "./notes/outlines/"
@@ -993,10 +1362,6 @@ task :outlines do |t|
     end
     puts "scene = #{count}"
   end
-end
-
-task :clean do
-  `rm -f *~ .*~ #* .\#* '\#*' `
 end
 
 # regression tests for the tool
@@ -1033,14 +1398,67 @@ end
 # chapters: { chapter_num => { :title, :full_text, :source_file, :pragmas } }
 # acts: ordered array of { :line => "* Act ...", :before_chapter => chapter_num_or_nil }
 def parse_chapters_and_acts_from_file(file_path, config)
-  chapter_head_tag = config[:chapter_head_tag] || "== chapter"
-  
   if !File.exist?(file_path)
     warn "*** warning: file #{file_path} not found"
     return { :chapters => {}, :acts => [] }
   end
   
   contents = File.read(file_path)
+  parse_chapters_and_acts_from_contents(contents, file_path, config)
+end
+
+def target_file_clean_in_git?(file)
+  system("git", "ls-files", "--error-unmatch", file, out: File::NULL, err: File::NULL) &&
+    system("git", "diff", "--quiet", "--", file) &&
+    system("git", "diff", "--cached", "--quiet", "--", file)
+end
+
+def renumber_chapters_in_contents(contents, config)
+  chapter_head_tag = config[:chapter_head_tag] || "== chapter"
+  next_act_start = 1
+  next_chapter_num = nil
+
+  contents.lines.map do |line|
+    if line.match?(/^\* Act\b/i)
+      next_chapter_num = next_act_start
+      next_act_start += next_act_start == 1 ? 9 : 10
+      line
+    elsif line =~ /^(\s*#{Regexp.escape(chapter_head_tag)}\s+)(\d+)/
+      next_chapter_num ||= 1
+      new_line = line.sub(/^(\s*#{Regexp.escape(chapter_head_tag)}\s+)\d+/, "\\1#{next_chapter_num}")
+      next_chapter_num += 1
+      next_act_start += 10 while next_act_start <= next_chapter_num
+      new_line
+    else
+      line
+    end
+  end.join
+end
+
+def renumber_chapters_in_file(file, config)
+  original = File.read(file)
+  updated = renumber_chapters_in_contents(original, config)
+  File.write(file, updated) if updated != original
+  updated != original
+end
+
+desc "Renumber chapters in each source file by act"
+task :renumber do
+  dirty_files = $target_files.reject { |file| target_file_clean_in_git?(file) }
+  unless dirty_files.empty?
+    abort "*** ERROR: refusing to renumber because these source files are not clean in git: #{dirty_files.join(', ')}"
+  end
+
+  $target_files.each do |file|
+    abort "*** ERROR: target file #{file} not found" unless File.exist?(file)
+
+    changed = renumber_chapters_in_file(file, config)
+    puts "#{changed ? 'Renumbered' : 'Already numbered'} #{file}"
+  end
+end
+
+def parse_chapters_and_acts_from_contents(contents, file_path, config)
+  chapter_head_tag = config[:chapter_head_tag] || "== chapter"
   lines = contents.split("\n")
   
   acts = []
@@ -1284,7 +1702,7 @@ end
 
 # Perform topological sort on chapters respecting pragma dependencies
 # Returns ordered array of chapter IDs ("file:local_ch_num")
-def topological_sort_chapters(chapter_dependencies, chapter_must_come_before, tag_definitions, all_chapters_by_id)
+def topological_sort_chapters(chapter_dependencies, chapter_must_come_before, tag_definitions, all_chapters_by_id, source_order_sequences = [], chapter_act_order = {})
   # Build in-degree map and adjacency list for topological sort
   in_degree = {}
   adjacency = {}
@@ -1292,6 +1710,15 @@ def topological_sort_chapters(chapter_dependencies, chapter_must_come_before, ta
   all_chapters_by_id.each do |chapter_id|
     in_degree[chapter_id] = 0
     adjacency[chapter_id] = []
+  end
+
+  add_topological_edge = lambda do |before_id, after_id|
+    next unless in_degree.key?(before_id) && in_degree.key?(after_id)
+    adjacency[before_id] ||= []
+    next if adjacency[before_id].include?(after_id)
+
+    adjacency[before_id] << after_id
+    in_degree[after_id] = (in_degree[after_id] || 0) + 1
   end
   
   # Handle MUST-BE-AFTER dependencies (this chapter depends on tagged chapters)
@@ -1301,9 +1728,7 @@ def topological_sort_chapters(chapter_dependencies, chapter_must_come_before, ta
       next unless dep_chapter_id
       
       # dep_chapter_id must come before chapter_id
-      adjacency[dep_chapter_id] ||= []
-      adjacency[dep_chapter_id] << chapter_id
-      in_degree[chapter_id] = (in_degree[chapter_id] || 0) + 1
+      add_topological_edge.call(dep_chapter_id, chapter_id)
     end
   end
   
@@ -1314,9 +1739,28 @@ def topological_sort_chapters(chapter_dependencies, chapter_must_come_before, ta
       next unless before_chapter_id
       
       # chapter_id must come before before_chapter_id
-      adjacency[chapter_id] ||= []
-      adjacency[chapter_id] << before_chapter_id
-      in_degree[before_chapter_id] = (in_degree[before_chapter_id] || 0) + 1
+      add_topological_edge.call(chapter_id, before_chapter_id)
+    end
+  end
+
+  # A chapter from a source thread must never jump ahead of an earlier chapter
+  # from that same source file when pragma sorting is applied.
+  source_order_sequences.each do |chapter_ids|
+    chapter_ids.each_cons(2) do |before_id, after_id|
+      add_topological_edge.call(before_id, after_id)
+    end
+  end
+
+  all_chapters_by_id.each do |before_id|
+    before_act_order = chapter_act_order[before_id]
+    next if before_act_order.nil?
+
+    all_chapters_by_id.each do |after_id|
+      after_act_order = chapter_act_order[after_id]
+      next if after_act_order.nil?
+      next unless before_act_order < after_act_order
+
+      add_topological_edge.call(before_id, after_id)
     end
   end
   
@@ -1345,6 +1789,60 @@ def topological_sort_chapters(chapter_dependencies, chapter_must_come_before, ta
   sorted
 end
 
+def source_order_sequences_for(all_data, target_files)
+  target_files.map do |file|
+    next [] unless all_data[file]
+
+    all_data[file][:chapters].keys.map { |local_ch_num| "#{file}:#{local_ch_num}" }
+  end
+end
+
+def act_order_index_for(all_acts, target_files)
+  act_order = {}
+
+  target_files.each do |file|
+    (all_acts[file] || []).each do |act_data|
+      act_id = act_id_from_line(act_data[:line])
+      next unless act_id
+      next if act_order.key?(act_id)
+
+      act_order[act_id] = act_order.size
+    end
+  end
+
+  act_order
+end
+
+def chapter_act_order_for(all_data, all_acts, target_files)
+  act_order = act_order_index_for(all_acts, target_files)
+  ret = {}
+
+  target_files.each do |file|
+    next unless all_data[file]
+
+    all_data[file][:chapters].each_key do |local_ch_num|
+      act_id = chapter_act_id(local_ch_num, all_acts[file] || [])
+      ret["#{file}:#{local_ch_num}"] = act_order[act_id]
+    end
+  end
+
+  ret
+end
+
+def acts_by_chapter_id(all_acts, target_files)
+  ret = Hash.new { |h, k| h[k] = [] }
+
+  target_files.each do |file|
+    (all_acts[file] || []).each do |act_data|
+      next unless act_data[:before_chapter]
+
+      ret["#{file}:#{act_data[:before_chapter]}"] << act_data
+    end
+  end
+
+  ret
+end
+
 # Shared function to parse all chapters and Acts, and validate structure
 def build_interleaved_data(all_data, all_acts, max_chapter, pragma_registry = nil)
   # Validate that Act lines are identical across all files (up to the minimum count)
@@ -1367,9 +1865,6 @@ def build_interleaved_data(all_data, all_acts, max_chapter, pragma_registry = ni
     end
   end
 
-  reference_file = $target_files[0]
-  reference_acts = all_acts[reference_file]
-  
   # Build list of all chapters in "file:chapter_num" format
   all_chapters = []
   (1..max_chapter).each do |local_ch_num|
@@ -1380,63 +1875,42 @@ def build_interleaved_data(all_data, all_acts, max_chapter, pragma_registry = ni
     end
   end
   
-  # If pragmas are provided, sort chapters by topological order
-  # Otherwise, use the natural sequential order
-  if pragma_registry && (pragma_registry[:chapter_dependencies].size > 0 || pragma_registry[:chapter_must_come_before].size > 0)
-    sorted_chapters = topological_sort_chapters(
-      pragma_registry[:chapter_dependencies],
-      pragma_registry[:chapter_must_come_before],
-      pragma_registry[:tag_definitions],
-      all_chapters
-    )
-  else
-    sorted_chapters = all_chapters
-  end
-  
-  # Build a mapping: for each reference file local chapter, which sequential chapter number is it?
-  # This helps us know when to output Acts from the reference file
-  ref_local_to_sequential = {}
-  sequential_chapter_num = 0
-  
-  sorted_chapters.each do |chapter_id|
-    file, local_ch_num_str = chapter_id.split(':')
-    local_ch_num = local_ch_num_str.to_i
-    sequential_chapter_num += 1
-    # Record the sequential chapter number when we encounter a chapter from the reference file
-    if file == reference_file
-      ref_local_to_sequential[local_ch_num] = sequential_chapter_num
-    end
-  end
+  sorted_chapters = topological_sort_chapters(
+    pragma_registry ? pragma_registry[:chapter_dependencies] : {},
+    pragma_registry ? pragma_registry[:chapter_must_come_before] : {},
+    pragma_registry ? pragma_registry[:tag_definitions] : {},
+    all_chapters,
+    source_order_sequences_for(all_data, $target_files),
+    chapter_act_order_for(all_data, all_acts, $target_files)
+  )
   
   # Build interleaved structure with pragmas-respecting chapter order
-  # Output Acts when we reach the corresponding chapter from the reference file
+  # Output Acts when we reach the chapter that follows the marker in any source file.
   interleaved = []
   sequential_chapter_num = 0
-  last_reference_chapter = nil
+  act_markers_by_chapter_id = acts_by_chapter_id(all_acts, $target_files)
+  seen_act_lines = Set.new
 
   sorted_chapters.each do |chapter_id|
     file, local_ch_num_str = chapter_id.split(':')
     local_ch_num = local_ch_num_str.to_i
-    
-    # Before outputting the first chapter from the reference file at a given local chapter number,
-    # check if any Acts should appear (only if chapter number is different from last time)
-    if file == reference_file && last_reference_chapter != local_ch_num
-      reference_acts.each do |act_data|
-        if act_data[:before_chapter] == local_ch_num
-          interleaved << { :type => :act, :line => act_data[:line] }
-        end
-      end
-      last_reference_chapter = local_ch_num
+
+    act_markers_by_chapter_id[chapter_id].each do |act_data|
+      next if seen_act_lines.include?(act_data[:line])
+
+      interleaved << { :type => :act, :line => act_data[:line] }
+      seen_act_lines.add(act_data[:line])
     end
     
     sequential_chapter_num += 1
     chapter_data = all_data[file][:chapters][local_ch_num]
     source_id = extract_source_id(file)
 
-    # Augment the chapter header with source identifier and renumber to sequential
-    augmented_text = chapter_data[:full_text]
-    augmented_text.sub!(/(\*\* chapter )\d+(:)/, "\\1#{sequential_chapter_num}\\2")
-    augmented_text.sub!(/(\*\* chapter \d+:)/, "\\1 #{source_id}")
+    # Augment the chapter header with source identifier/original chapter and renumber to sequential
+    augmented_text = chapter_data[:full_text].dup
+    augmented_text.sub!(/^(\*\*\s*chapter\s+)(\d+)([^:\n]*:)/i) do
+      "#{$1}#{sequential_chapter_num} (#{source_id} #{$2})#{$3}"
+    end
 
     interleaved << { :type => :chapter, :text => augmented_text, :chapter_id => chapter_id, :sequential_num => sequential_chapter_num }
   end
@@ -1594,9 +2068,89 @@ def remove_arrows(text)
   text.gsub(/<={2,}/, "")
 end
 
+def frontmatter_files(config)
+  configured = config[:frontmatter] || config["frontmatter"] || config[:front_matter] || config["front_matter"]
+  Array(configured).compact
+end
+
+def markdown_file?(file)
+  [".md", ".markdown"].include?(File.extname(file).downcase)
+end
+
+def read_frontmatter_file(file)
+  abort "*** ERROR: frontmatter file #{file} not found" unless File.exist?(file)
+
+  File.read(file)
+end
+
+def frontmatter_text(config)
+  contents = frontmatter_files(config).map { |file| read_frontmatter_file(file).strip }.reject(&:empty?)
+  return "" if contents.empty?
+
+  contents.join("\n\n") + "\n\n"
+end
+
+def markdown_file_to_html(file)
+  html = `pandoc #{Shellwords.escape(file)} -t html`
+  abort "*** ERROR: Failed to convert frontmatter markdown #{file} to HTML using pandoc" unless $?.success?
+
+  html
+end
+
+def plain_text_to_html(text)
+  paragraphs = text.split(/\n\s*\n/).map(&:strip).reject(&:empty?)
+  paragraphs.map do |paragraph|
+    escaped = CGI.escapeHTML(paragraph.gsub(/\n/, " ").strip)
+    "<p>#{escaped}</p>"
+  end.join("\n")
+end
+
+def frontmatter_html(config)
+  html_parts = frontmatter_files(config).map do |file|
+    contents = read_frontmatter_file(file)
+    markdown_file?(file) ? markdown_file_to_html(file) : plain_text_to_html(contents)
+  end.map(&:strip).reject(&:empty?)
+
+  return "" if html_parts.empty?
+
+  html_parts.join("\n") + "\n"
+end
+
+def frontmatter_html_with_page_break_markers(config)
+  html_parts = frontmatter_files(config).each_with_index.map do |file, idx|
+    contents = read_frontmatter_file(file)
+    html = markdown_file?(file) ? markdown_file_to_html(file) : plain_text_to_html(contents)
+    [html.strip, %(<p>DOCX_FRONTMATTER_PAGE_BREAK_#{idx}</p>)]
+  end.flatten.reject(&:empty?)
+
+  return "" if html_parts.empty?
+
+  html_parts.join("\n") + "\n"
+end
+
+def config_author(config)
+  config[:author] || config["author"]
+end
+
+def title_page_html(config)
+  title = config[:title] || config["title"] || $title
+  author = config_author(config)
+  html_parts = [
+    %(<section class="title-page" style="page-break-after: always;">),
+    %(<h1>#{CGI.escapeHTML(title.to_s)}</h1>)
+  ]
+  unless author.nil? || author.to_s.strip == ""
+    html_parts << %(<h2>#{CGI.escapeHTML(author.to_s)}</h2>)
+  end
+  html_parts << %(</section>)
+  html_parts.join("\n") + "\n"
+end
+
 # Format interleaved data as plain text
-def format_interleaved_as_text(interleaved)
+def format_interleaved_as_text(interleaved, config = nil)
   output_lines = []
+  frontmatter = config ? frontmatter_text(config) : ""
+  output_lines << frontmatter unless frontmatter.empty?
 
   interleaved.each do |item|
     if item[:type] == :act
@@ -1612,8 +2166,12 @@ def format_interleaved_as_text(interleaved)
 end
 
 # Format interleaved data as HTML
-def format_interleaved_as_html(interleaved)
+def format_interleaved_as_html(interleaved, config = nil, include_title_page = false, frontmatter_page_breaks = false)
+  require 'cgi'
+
   html_parts = []
+  html_parts << title_page_html(config) if config && include_title_page
+  html_parts << (frontmatter_page_breaks ? frontmatter_html_with_page_break_markers(config) : frontmatter_html(config)) if config
 
   interleaved.each do |item|
     if item[:type] == :act
@@ -1651,8 +2209,7 @@ def format_interleaved_as_html(interleaved)
   html_parts.join("\n")
 end
 
-desc "Interleave chapters from all source files and write to output.txt"
-task :interleave_txt do
+def build_interleaved_chapters_for_targets(config)
   all_data = {}
   all_acts = {}
   max_chapter = 0
@@ -1685,6 +2242,36 @@ task :interleave_txt do
   end
 
   interleaved = build_interleaved_data(all_data, all_acts, max_chapter, pragma_registry)
+
+  {
+    :all_data => all_data,
+    :all_acts => all_acts,
+    :max_chapter => max_chapter,
+    :pragma_registry => pragma_registry,
+    :interleaved => interleaved
+  }
+end
+
+def print_interleave_summary(max_chapter)
+  puts "  Max chapter number: #{max_chapter}"
+  puts "  Source files: #{$target_files.join(', ')}"
+end
+
+def print_pragma_output_validation(interleaved, pragma_registry, all_data)
+  if pragma_registry[:chapter_dependencies].size > 0 || pragma_registry[:chapter_must_come_before].size > 0 || pragma_registry[:tag_definitions].size > 0
+    puts ""
+    puts "Pragma constraint verification:"
+    validate_pragma_constraints_in_output(interleaved, pragma_registry, all_data, $target_files)
+  end
+end
+
+desc "Interleave chapters from all source files and write to output.txt"
+task :interleave_txt do
+  result = build_interleaved_chapters_for_targets(config)
+  all_data = result[:all_data]
+  max_chapter = result[:max_chapter]
+  pragma_registry = result[:pragma_registry]
+  interleaved = result[:interleaved]
 
   # --- BOOK SPLIT FEATURE ---
   if book_split
@@ -1753,169 +2340,184 @@ task :interleave_txt do
       if acts_seen != acts_for_book
         abort "*** ERROR: Acts for book '#{book}' do not appear in the order specified in book_split.\n  Expected: #{acts_for_book.join(', ')}\n  Found:    #{acts_seen.join(', ')}"
       end
-      output_text = format_interleaved_as_text(filtered)
+      output_text = format_interleaved_as_text(filtered, config)
       fname = book.gsub(/[^a-zA-Z0-9_\-]+/, '_') + ".txt"
       File.open(fname, "w") { |f| f.write(output_text) }
       puts "Wrote interleaved chapters to #{fname}"
     end
-    puts "  Max chapter number: #{max_chapter}"
-    puts "  Source files: #{$target_files.join(', ')}"
+    print_interleave_summary(max_chapter)
     exit 0
   end
   # --- END BOOK SPLIT FEATURE ---
 
-  output_text = format_interleaved_as_text(interleaved)
+  output_text = format_interleaved_as_text(interleaved, config)
 
   File.open("output.txt", "w") do |f|
     f.write(output_text)
   end
 
   puts "Wrote interleaved chapters to output.txt"
-  puts "  Max chapter number: #{max_chapter}"
-  puts "  Source files: #{$target_files.join(', ')}"
+  print_interleave_summary(max_chapter)
 
   # Validate pragma constraints in the output
-  if pragma_registry[:chapter_dependencies].size > 0 || pragma_registry[:chapter_must_come_before].size > 0 || pragma_registry[:tag_definitions].size > 0
-    puts ""
-    puts "Pragma constraint verification:"
-    validate_pragma_constraints_in_output(interleaved, pragma_registry, all_data, $target_files)
+  print_pragma_output_validation(interleaved, pragma_registry, all_data)
+end
+
+desc "Interleave chapters in memory, then show chapter overview for the result"
+def print_interleaved_chapter_overview(config, hide_done)
+  result = build_interleaved_chapters_for_targets(config)
+  all_data = result[:all_data]
+  max_chapter = result[:max_chapter]
+  pragma_registry = result[:pragma_registry]
+  interleaved = result[:interleaved]
+  output_text = format_interleaved_as_text(interleaved, config)
+  output_name = "interleaved"
+
+  puts "Built interleaved chapters in memory"
+  print_interleave_summary(max_chapter)
+  print_pragma_output_validation(interleaved, pragma_registry, all_data)
+
+  ret = get_chapter_hash(config, nil, [output_name], { output_name => output_text })
+  print_chapter_report("#{$title} (interleaved)", config, ret, [output_name], { output_name => output_text }, :always, hide_done)
+end
+
+task :ich do
+  print_interleaved_chapter_overview(config, false)
+end
+
+desc "Interleave chapters in memory, then show only incomplete chapters in the overview"
+task :ichv do
+  print_interleaved_chapter_overview(config, true)
+end
+
+def docx_reference_file(config)
+  config[:docx_reference] || config["docx_reference"] || ".default.docx"
+end
+
+def pandoc_docx_reference_args(config)
+  reference_file = docx_reference_file(config)
+  return [] if reference_file.nil? || reference_file.to_s.strip == ""
+
+  unless File.exist?(reference_file)
+    warn "*** WARNING: DOCX reference file #{reference_file} not found; generating #{File.basename(reference_file)} without a reference document"
+    return []
   end
+
+  ["--reference-doc=#{reference_file}"]
 end
 
 # Helper function to convert HTML to DOCX using Pandoc
 # Pandoc properly preserves heading hierarchy
-def convert_html_to_docx_pandoc(html_file, docx_file)
-  cmd = "pandoc #{html_file} -o #{docx_file}"
-  result = system(cmd)
+def convert_html_to_docx_pandoc(html_file, docx_file, config = {})
+  args = ["pandoc", html_file] + pandoc_docx_reference_args(config) + ["-o", docx_file]
+  result = system(*args)
   
   unless result && File.exist?(docx_file)
     abort "*** ERROR: Failed to convert #{html_file} to DOCX using pandoc"
   end
 end
 
+def docx_xml_text_for(text)
+  CGI.escapeHTML(text.to_s)
+end
+
+def center_docx_paragraph(paragraph_xml)
+  if paragraph_xml.include?("<w:pPr>")
+    return paragraph_xml if paragraph_xml.include?("<w:jc ")
+
+    paragraph_xml.sub("</w:pPr>", %(<w:jc w:val="center"/></w:pPr>))
+  else
+    paragraph_xml.sub("<w:p>", %(<w:p><w:pPr><w:jc w:val="center"/></w:pPr>))
+  end
+end
+
+def set_docx_paragraph_style(paragraph_xml, style_id)
+  if paragraph_xml.include?("<w:pStyle ")
+    paragraph_xml.sub(/<w:pStyle\s+w:val="[^"]*"\s*\/>/, %(<w:pStyle w:val="#{style_id}"/>))
+  elsif paragraph_xml.include?("<w:pPr>")
+    paragraph_xml.sub("<w:pPr>", %(<w:pPr><w:pStyle w:val="#{style_id}"/>))
+  else
+    paragraph_xml.sub("<w:p>", %(<w:p><w:pPr><w:pStyle w:val="#{style_id}"/></w:pPr>))
+  end
+end
+
+def add_docx_page_break_after_paragraph(paragraph_xml)
+  return paragraph_xml if paragraph_xml.include?(%(<w:br w:type="page"))
+
+  paragraph_xml.sub("</w:p>", %(<w:r><w:br w:type="page"/></w:r></w:p>))
+end
+
+def docx_page_break_paragraph
+  %(<w:p><w:r><w:br w:type="page"/></w:r></w:p>)
+end
+
+def postprocess_docx_title_page(docx_file, config)
+  require 'zip'
+
+  title = config[:title] || config["title"] || $title
+  author = config_author(config)
+  title_text = docx_xml_text_for(title)
+  author_text = docx_xml_text_for(author)
+
+  Zip::File.open(docx_file) do |zip|
+    entry = zip.find_entry("word/document.xml")
+    return unless entry
+
+    xml = entry.get_input_stream.read
+    title_done = false
+    author_done = author.nil? || author.to_s.strip == ""
+
+    xml = xml.gsub(/<w:p\b.*?<\/w:p>/m) do |paragraph|
+      if !title_done && paragraph.include?(title_text)
+        title_done = true
+        paragraph = set_docx_paragraph_style(paragraph, "TitlePageTitle")
+        paragraph = center_docx_paragraph(paragraph)
+        paragraph = add_docx_page_break_after_paragraph(paragraph) if author_done
+        paragraph
+      elsif !author_done && paragraph.include?(author_text)
+        author_done = true
+        paragraph = set_docx_paragraph_style(paragraph, "TitlePageAuthor")
+        paragraph = center_docx_paragraph(paragraph)
+        add_docx_page_break_after_paragraph(paragraph)
+      else
+        paragraph.include?("DOCX_FRONTMATTER_PAGE_BREAK_") ? docx_page_break_paragraph : paragraph
+      end
+    end
+
+    zip.get_output_stream("word/document.xml") { |f| f.write(xml) }
+  end
+end
+
 desc "Interleave chapters from all source files and write to output.html"
 task :interleave_html do
   require 'cgi'
-  
-  all_data = {}
-  all_acts = {}
-  max_chapter = 0
 
-  $target_files.each do |file|
-    data = parse_chapters_and_acts_from_file(file, config)
-    all_data[file] = data
-    all_acts[file] = data[:acts]
-    max_chapter = [max_chapter, data[:chapters].keys.max || 0].max
-  end
-
-  if max_chapter == 0
-    abort "No chapters found in any source files"
-  end
-
-  # Build pragma registry and validate
-  pragma_registry = build_pragma_registry(all_data, $target_files)
-  
-  # Report validation errors
-  if pragma_registry[:undefined_tags].size > 0
-    puts "*** WARNING: Undefined pragma tags: #{pragma_registry[:undefined_tags].join(', ')}"
-  end
-  
-  if pragma_registry[:unused_tags].size > 0
-    puts "*** WARNING: Unused pragma tags: #{pragma_registry[:unused_tags].join(', ')}"
-  end
-  
-  if pragma_registry[:circular_deps].size > 0
-    abort "*** ERROR: Circular dependencies detected in pragmas: #{pragma_registry[:circular_deps].join(', ')}"
-  end
-
-  interleaved = build_interleaved_data(all_data, all_acts, max_chapter, pragma_registry)
-  output_html = format_interleaved_as_html(interleaved)
+  result = build_interleaved_chapters_for_targets(config)
+  all_data = result[:all_data]
+  max_chapter = result[:max_chapter]
+  pragma_registry = result[:pragma_registry]
+  interleaved = result[:interleaved]
+  output_html = format_interleaved_as_html(interleaved, config)
 
   File.open("output.html", "w") do |f|
     f.write(output_html)
   end
 
   puts "Wrote interleaved chapters to output.html"
-  puts "  Max chapter number: #{max_chapter}"
-  puts "  Source files: #{$target_files.join(', ')}"
-  
-  # Validate pragma constraints in the output
-  if pragma_registry[:chapter_dependencies].size > 0 || pragma_registry[:chapter_must_come_before].size > 0 || pragma_registry[:tag_definitions].size > 0
-    puts ""
-    puts "Pragma constraint verification:"
-    validate_pragma_constraints_in_output(interleaved, pragma_registry, all_data, $target_files)
-  end
-end
-
-# Helper function to convert HTML to DOCX using LibreOffice
-# Uses two-step conversion: HTML → ODT → DOCX for better compatibility
-def convert_html_to_docx(html_file, docx_file)
-  output_dir = File.dirname(docx_file) == '' ? '.' : File.dirname(docx_file)
-  
-  # Step 1: Convert HTML to ODT
-  odt_file = File.join(output_dir, File.basename(html_file, '.*') + '.odt')
-  cmd_html_to_odt = "libreoffice --headless --convert-to odt #{html_file} --outdir #{output_dir}"
-  result = system(cmd_html_to_odt)
-  
-  unless result && File.exist?(odt_file)
-    abort "*** ERROR: Failed to convert #{html_file} to ODT using LibreOffice"
-  end
-  
-  # Step 2: Convert ODT to DOCX
-  cmd_odt_to_docx = "libreoffice --headless --convert-to docx #{odt_file} --outdir #{output_dir}"
-  result = system(cmd_odt_to_docx)
-  
-  unless result && File.exist?(odt_file.gsub(/\.odt$/, '.docx'))
-    abort "*** ERROR: Failed to convert #{odt_file} to DOCX using LibreOffice"
-  end
-  
-  # Rename if output name differs
-  actual_docx = odt_file.gsub(/\.odt$/, '.docx')
-  if actual_docx != docx_file
-    File.rename(actual_docx, docx_file) rescue nil
-  end
-  
-  # Clean up temporary ODT file
-  File.delete(odt_file) if File.exist?(odt_file)
+  print_interleave_summary(max_chapter)
+  print_pragma_output_validation(interleaved, pragma_registry, all_data)
 end
 
 desc "Interleave chapters from all source files and write to output.docx"
 task :interleave_doc do
   require 'cgi'
-  
-  all_data = {}
-  all_acts = {}
-  max_chapter = 0
 
-  $target_files.each do |file|
-    data = parse_chapters_and_acts_from_file(file, config)
-    all_data[file] = data
-    all_acts[file] = data[:acts]
-    max_chapter = [max_chapter, data[:chapters].keys.max || 0].max
-  end
-
-  if max_chapter == 0
-    abort "No chapters found in any source files"
-  end
-
-  # Build pragma registry and validate
-  pragma_registry = build_pragma_registry(all_data, $target_files)
-  
-  # Report validation errors
-  if pragma_registry[:undefined_tags].size > 0
-    puts "*** WARNING: Undefined pragma tags: #{pragma_registry[:undefined_tags].join(', ')}"
-  end
-  
-  if pragma_registry[:unused_tags].size > 0
-    puts "*** WARNING: Unused pragma tags: #{pragma_registry[:unused_tags].join(', ')}"
-  end
-  
-  if pragma_registry[:circular_deps].size > 0
-    abort "*** ERROR: Circular dependencies detected in pragmas: #{pragma_registry[:circular_deps].join(', ')}"
-  end
-
-  interleaved = build_interleaved_data(all_data, all_acts, max_chapter, pragma_registry)
-  output_html = format_interleaved_as_html(interleaved)
+  result = build_interleaved_chapters_for_targets(config)
+  all_data = result[:all_data]
+  max_chapter = result[:max_chapter]
+  pragma_registry = result[:pragma_registry]
+  interleaved = result[:interleaved]
+  output_html = format_interleaved_as_html(interleaved, config, true, true)
 
   # Write HTML to temporary file
   html_file = "output.html"
@@ -1927,18 +2529,12 @@ task :interleave_doc do
   
   # Convert HTML to DOCX using pandoc (preserves heading hierarchy)
   docx_file = "output.docx"
-  convert_html_to_docx_pandoc(html_file, docx_file)
+  convert_html_to_docx_pandoc(html_file, docx_file, config)
+  postprocess_docx_title_page(docx_file, config)
   
   puts "Converted to #{docx_file}"
-  puts "  Max chapter number: #{max_chapter}"
-  puts "  Source files: #{$target_files.join(', ')}"
-  
-  # Validate pragma constraints in the output
-  if pragma_registry[:chapter_dependencies].size > 0 || pragma_registry[:chapter_must_come_before].size > 0 || pragma_registry[:tag_definitions].size > 0
-    puts ""
-    puts "Pragma constraint verification:"
-    validate_pragma_constraints_in_output(interleaved, pragma_registry, all_data, $target_files)
-  end
+  print_interleave_summary(max_chapter)
+  print_pragma_output_validation(interleaved, pragma_registry, all_data)
 end
 
 # Alias: interleave_text does the same as interleave_txt

@@ -61,6 +61,338 @@ class InterleaveTest < Minitest::Test
     end
   end
 
+  def test_interleave_prepends_single_frontmatter_file
+    Dir.chdir(@tmp) do
+      File.write('front.txt', "Dramatis Personae\nAlice\n")
+      File.write('.rakefile.yaml', <<~YAML)
+        :target_files:
+          - fixtures/story_lopez.txt
+          - fixtures/story_spacex.txt
+        :frontmatter:
+          - front.txt
+        :title: Frontmatter Test
+        :target_words: 100
+        :date_start: '2026-03-02'
+        :chapter_head_tag: '** chapter'
+      YAML
+
+      system('rake interleave_txt') or raise 'rake failed'
+      out = File.read('output.txt')
+
+      assert out.start_with?("Dramatis Personae\nAlice\n")
+      assert out.index("Dramatis Personae") < out.index("** chapter")
+    end
+  end
+
+  def test_interleave_prepends_multiple_frontmatter_files_in_order
+    Dir.chdir(@tmp) do
+      File.write('front_a.txt', "First front section\n")
+      File.write('front_b.txt', "Second front section\n")
+      File.write('.rakefile.yaml', <<~YAML)
+        :target_files:
+          - fixtures/story_lopez.txt
+          - fixtures/story_spacex.txt
+        :frontmatter:
+          - front_a.txt
+          - front_b.txt
+        :title: Frontmatter Test
+        :target_words: 100
+        :date_start: '2026-03-02'
+        :chapter_head_tag: '** chapter'
+      YAML
+
+      system('rake interleave_txt') or raise 'rake failed'
+      out = File.read('output.txt')
+
+      assert out.index("First front section") < out.index("Second front section")
+      assert out.index("Second front section") < out.index("** chapter")
+    end
+  end
+
+  def test_interleave_html_preserves_markdown_frontmatter_semantics
+    Dir.chdir(@tmp) do
+      File.write('dramatis.md', <<~MD)
+        # Dramatis
+
+        - Alice
+        - Bob
+      MD
+      File.write('.rakefile.yaml', <<~YAML)
+        :target_files:
+          - fixtures/story_lopez.txt
+          - fixtures/story_spacex.txt
+        :frontmatter:
+          - dramatis.md
+        :title: Frontmatter Test
+        :target_words: 100
+        :date_start: '2026-03-02'
+        :chapter_head_tag: '** chapter'
+      YAML
+
+      system('rake interleave_html') or raise 'rake failed'
+      out = File.read('output.html')
+
+      assert_match(/<h1[^>]*>Dramatis<\/h1>/, out)
+      assert_match(/<li>Alice<\/li>/, out)
+      assert out.index("Dramatis") < out.index("chapter")
+    end
+  end
+
+  def test_ich_reports_interleaved_chapters_without_writing_output
+    Dir.chdir(@tmp) do
+      out = `rake ich`
+      assert $?.success?, 'rake ich failed'
+      plain_out = out.gsub(/\e\[[0-9;]*m/, "")
+
+      refute File.exist?('output.txt'), 'ich should not write output.txt'
+      assert_match(/Built interleaved chapters in memory/, plain_out)
+      assert_match(/\| interleaved/, plain_out)
+      assert_match(/\|\s+1\s+.*\(LOPEZ 1\): One/, plain_out)
+      assert_match(/\|\s+2\s+.*\(SPACEX 1\): Alpha/, plain_out)
+      assert_match(/\* 3 chapters not done/, plain_out)
+    end
+  end
+
+  def test_ichv_matches_ich_with_done_lines_removed
+    Dir.chdir(@tmp) do
+      ich_out = `rake ich`
+      assert $?.success?, 'rake ich failed'
+
+      ichv_out = `rake ichv`
+      assert $?.success?, 'rake ichv failed'
+
+      expected = ich_out.lines.reject { |line| line.include?("✓") }.join
+      assert_equal expected, ichv_out
+    end
+  end
+
+  def test_interleave_renumbers_chapter_with_parenthetical_before_colon
+    Dir.chdir(@tmp) do
+      File.write('fixtures/story_a.txt', <<~TEXT)
+        ** chapter 1: first
+        one
+
+        ** chapter 2 (later): second
+        two
+      TEXT
+      File.write('fixtures/story_b.txt', <<~TEXT)
+        ** chapter 1: alpha
+        alpha
+
+        ** chapter 2: beta
+        beta
+      TEXT
+      File.write('.rakefile.yaml', <<~YAML)
+        :target_files:
+          - fixtures/story_a.txt
+          - fixtures/story_b.txt
+        :title: Parenthetical Test
+        :target_words: 100
+        :date_start: '2026-03-02'
+        :chapter_head_tag: '** chapter'
+      YAML
+
+      system('rake interleave_txt') or raise 'rake failed'
+      out = File.read('output.txt')
+
+      assert_match(/\*\* chapter 3 \(A 2\) \(later\): second/, out)
+      refute_match(/\*\* chapter 2 \(later\):/, out)
+    end
+  end
+
+  def test_interleave_includes_act_markers_from_any_source_file
+    Dir.chdir(@tmp) do
+      File.write('fixtures/story_a.txt', <<~TEXT)
+        * Act 1: shared beginning
+
+        ** chapter 1: first
+        one
+      TEXT
+      File.write('fixtures/story_b.txt', <<~TEXT)
+        * Act 1: shared beginning
+
+        ** chapter 1: alpha
+        alpha
+
+        * Act 2: second-file-only act
+
+        ** chapter 2: beta
+        beta
+      TEXT
+      File.write('.rakefile.yaml', <<~YAML)
+        :target_files:
+          - fixtures/story_a.txt
+          - fixtures/story_b.txt
+        :title: Any Act Test
+        :target_words: 100
+        :date_start: '2026-03-02'
+        :chapter_head_tag: '** chapter'
+      YAML
+
+      system('rake interleave_txt') or raise 'rake failed'
+      out = File.read('output.txt')
+
+      assert_equal 1, out.scan(/^\* Act 1: shared beginning$/).size
+      assert_match(/^\* Act 2: second-file-only act$/m, out)
+      assert out.index("* Act 2: second-file-only act") < out.index("beta")
+    end
+  end
+
+  def test_interleave_keeps_chapters_inside_their_source_act
+    Dir.chdir(@tmp) do
+      File.write('fixtures/story_a.txt', <<~TEXT)
+        * Act 1: shared beginning
+
+        ** chapter 1: a act one
+        a one
+
+        * Act 2: later
+
+        ** chapter 2: a act two
+        a two
+      TEXT
+      File.write('fixtures/story_b.txt', <<~TEXT)
+        * Act 1: shared beginning
+
+        ** chapter 1: b act one
+        b one
+
+        ** chapter 2: b still act one
+        b two
+      TEXT
+      File.write('.rakefile.yaml', <<~YAML)
+        :target_files:
+          - fixtures/story_a.txt
+          - fixtures/story_b.txt
+        :title: Act Boundary Test
+        :target_words: 100
+        :date_start: '2026-03-02'
+        :chapter_head_tag: '** chapter'
+      YAML
+
+      system('rake interleave_txt') or raise 'rake failed'
+      out = File.read('output.txt')
+
+      assert out.index("b two") < out.index("* Act 2: later")
+      assert out.index("* Act 2: later") < out.index("a two")
+    end
+  end
+
+  def test_renumber_numbers_each_source_file_by_act
+    Dir.chdir(@tmp) do
+      File.write('fixtures/story_a.txt', <<~TEXT)
+        * Act 1: start
+
+        ** chapter 7: first
+        one
+
+        ** chapter 9 (note): second
+        two
+
+        * Act 2: middle
+
+        ** chapter 42: third
+        three
+
+        ** chapter 43: fourth
+        four
+
+        * Act 3: end
+
+        ** chapter 99: fifth
+        five
+      TEXT
+      File.write('.rakefile.yaml', <<~YAML)
+        :target_files:
+          - fixtures/story_a.txt
+        :title: Renumber Test
+        :target_words: 100
+        :date_start: '2026-03-02'
+        :chapter_head_tag: '** chapter'
+      YAML
+
+      system('git', 'init', out: File::NULL, err: File::NULL) or raise 'git init failed'
+      system('git', 'config', 'user.email', 'test@example.com') or raise 'git config failed'
+      system('git', 'config', 'user.name', 'Test User') or raise 'git config failed'
+      system('git', 'add', '.') or raise 'git add failed'
+      system('git', 'commit', '-m', 'initial', out: File::NULL, err: File::NULL) or raise 'git commit failed'
+
+      system('rake renumber') or raise 'rake renumber failed'
+      out = File.read('fixtures/story_a.txt')
+
+      assert_match(/^\*\* chapter 1: first$/m, out)
+      assert_match(/^\*\* chapter 2 \(note\): second$/m, out)
+      assert_match(/^\*\* chapter 10: third$/m, out)
+      assert_match(/^\*\* chapter 11: fourth$/m, out)
+      assert_match(/^\*\* chapter 20: fifth$/m, out)
+    end
+  end
+
+  def test_renumber_skips_to_next_free_decade_when_act_has_more_than_ten_chapters
+    Dir.chdir(@tmp) do
+      chapters = (1..12).map do |idx|
+        "** chapter #{idx + 30}: act one #{idx}\nbody #{idx}\n"
+      end.join("\n")
+      File.write('fixtures/story_a.txt', <<~TEXT)
+        * Act 1: start
+
+        #{chapters}
+        * Act 2: middle
+
+        ** chapter 90: act two first
+        later
+      TEXT
+      File.write('.rakefile.yaml', <<~YAML)
+        :target_files:
+          - fixtures/story_a.txt
+        :title: Renumber Decade Test
+        :target_words: 100
+        :date_start: '2026-03-02'
+        :chapter_head_tag: '** chapter'
+      YAML
+
+      system('git', 'init', out: File::NULL, err: File::NULL) or raise 'git init failed'
+      system('git', 'config', 'user.email', 'test@example.com') or raise 'git config failed'
+      system('git', 'config', 'user.name', 'Test User') or raise 'git config failed'
+      system('git', 'add', '.') or raise 'git add failed'
+      system('git', 'commit', '-m', 'initial', out: File::NULL, err: File::NULL) or raise 'git commit failed'
+
+      system('rake renumber') or raise 'rake renumber failed'
+      out = File.read('fixtures/story_a.txt')
+
+      assert_match(/^\*\* chapter 12: act one 12$/m, out)
+      assert_match(/^\*\* chapter 20: act two first$/m, out)
+    end
+  end
+
+  def test_renumber_aborts_when_source_file_has_git_diff
+    Dir.chdir(@tmp) do
+      File.write('fixtures/story_a.txt', <<~TEXT)
+        ** chapter 7: first
+        one
+      TEXT
+      File.write('.rakefile.yaml', <<~YAML)
+        :target_files:
+          - fixtures/story_a.txt
+        :title: Renumber Dirty Test
+        :target_words: 100
+        :date_start: '2026-03-02'
+        :chapter_head_tag: '** chapter'
+      YAML
+
+      system('git', 'init', out: File::NULL, err: File::NULL) or raise 'git init failed'
+      system('git', 'config', 'user.email', 'test@example.com') or raise 'git config failed'
+      system('git', 'config', 'user.name', 'Test User') or raise 'git config failed'
+      system('git', 'add', '.') or raise 'git add failed'
+      system('git', 'commit', '-m', 'initial', out: File::NULL, err: File::NULL) or raise 'git commit failed'
+
+      File.open('fixtures/story_a.txt', 'a') { |f| f.puts "dirty edit" }
+
+      refute system('rake renumber'), 'rake renumber should fail when target file has git diff'
+      assert_match(/dirty edit/, File.read('fixtures/story_a.txt'))
+    end
+  end
+
   def test_act_mismatch_fails
     Dir.chdir(@tmp) do
       # overwrite config to point at mismatch fixtures

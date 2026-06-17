@@ -1,13 +1,13 @@
 * Act 1: The Beginning
 
-** chapter 1: LOPEZ One
+** chapter 1 (LOPEZ 1): One
 This is Lopez chapter one.
 
-** chapter 2: SPACEX Alpha
+** chapter 2 (SPACEX 1): Alpha
 This is Spacex chapter one.
 
-** chapter 3: LOPEZ Two
+** chapter 3 (LOPEZ 2): Two
 This is Lopez chapter two.
 
-** chapter 4: SPACEX Beta
+** chapter 4 (SPACEX 2): Beta
 This is Spacex chapter two.
