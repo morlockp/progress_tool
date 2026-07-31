@@ -63,6 +63,29 @@ class InterleaveDocTest < Minitest::Test
     end
   end
 
+  def test_interleave_doc_removes_colons_from_output_filename
+    Dir.chdir(@tmp) do
+      yaml_content = <<~YAML
+        :target_files:
+          - fixtures/story_lopez.txt
+          - fixtures/story_spacex.txt
+        :title: "Aristillus:123"
+        :draft: 7
+        :target_words: 1000
+        :chapter_head_tag: '** chapter'
+        :date_start: '1 Jan 1970'
+      YAML
+      File.write('.rakefile.yaml', yaml_content)
+
+      system('rake interleave_doc') or raise 'rake failed'
+
+      assert File.exist?('Aristillus123_draft_7.docx')
+      assert File.exist?('Aristillus123_draft_7.html')
+      refute File.exist?('Aristillus:123_draft_7.docx')
+      refute File.exist?('Aristillus:123_draft_7.html')
+    end
+  end
+
   def test_docx_has_heading_hierarchy
     Dir.chdir(@tmp) do
       system('rake interleave_doc') or raise 'rake failed'
@@ -170,6 +193,71 @@ class InterleaveDocTest < Minitest::Test
     end
   end
 
+  def test_docx_preserves_markdown_frontmatter_line_breaks
+    Dir.chdir(@tmp) do
+      File.write('quote.md', <<~MD)
+        *first line
+        second line
+        third line*
+      MD
+
+      yaml_content = <<~YAML
+        :target_files:
+          - fixtures/story_lopez.txt
+        :frontmatter:
+          - quote.md
+        :title: Test
+        :target_words: 1000
+        :chapter_head_tag: '** chapter'
+        :date_start: '1 Jan 1970'
+      YAML
+      File.write('.rakefile.yaml', yaml_content)
+
+      system('rake interleave_doc') or raise 'rake failed'
+
+      content_xml = extract_docx_content(Dir['*_draft_0.docx'].first)
+
+      assert_operator content_xml.scan(/<w:br\b[^>]*>/).size, :>=, 2
+    end
+  end
+
+  def test_docx_applies_timeline_style_to_marked_frontmatter_file
+    Dir.chdir(@tmp) do
+      File.write('timeline.md', <<~MD)
+        # Timeline
+
+        - 2051: Anti gravity developed
+        - 2165: Escape from Io begins
+      MD
+
+      yaml_content = <<~YAML
+        :target_files:
+          - fixtures/story_lopez.txt
+          - fixtures/story_spacex.txt
+        :frontmatter:
+          - file: timeline.md
+            style: timeline
+        :title: Test
+        :target_words: 1000
+        :chapter_head_tag: '** chapter'
+        :date_start: '1 Jan 1970'
+      YAML
+      File.write('.rakefile.yaml', yaml_content)
+
+      system('rake interleave_doc') or raise 'rake failed'
+
+      docx_file = Dir['*_draft_0.docx'].first
+      content_xml = extract_docx_content(docx_file)
+      styles_xml = extract_docx_file(docx_file, 'word/styles.xml')
+
+      assert_match(/w:style w:type="paragraph" w:styleId="FrontmatterTimeline".*?w:sz w:val="20"/m, styles_xml)
+      assert_match(/<w:pStyle w:val="FrontmatterHeading1"\s*\/>.*?Timeline/m, content_xml)
+      assert_match(/<w:pStyle w:val="FrontmatterTimeline"\s*\/>.*?2051/m, content_xml)
+      assert_match(/<w:pStyle w:val="FrontmatterTimeline"\s*\/>.*?2165/m, content_xml)
+      refute_match(/DOCX_FRONTMATTER_TIMELINE_START|DOCX_FRONTMATTER_TIMELINE_END/, content_xml)
+    end
+  end
+
   def test_docx_title_page_comes_before_frontmatter
     Dir.chdir(@tmp) do
       File.write('dramatis.md', <<~MD)
@@ -237,6 +325,27 @@ class InterleaveDocTest < Minitest::Test
     end
   end
 
+  def test_interleave_doc_reports_default_toc_location_when_not_configured
+    Dir.chdir(@tmp) do
+      yaml_content = <<~YAML
+        :target_files:
+          - fixtures/story_lopez.txt
+          - fixtures/story_spacex.txt
+        :title: Test Novel
+        :author: Test Author
+        :target_words: 1000
+        :chapter_head_tag: '** chapter'
+        :date_start: '1 Jan 1970'
+      YAML
+      File.write('.rakefile.yaml', yaml_content)
+
+      out = `rake interleave_doc 2>&1`
+
+      assert $?.success?, 'rake interleave_doc should succeed'
+      assert_match(/:TOC not specified in :frontmatter; adding in default location/, out)
+    end
+  end
+
   def test_docx_has_table_of_contents_after_title_page
     Dir.chdir(@tmp) do
       File.write('dramatis.md', <<~MD)
@@ -279,6 +388,41 @@ class InterleaveDocTest < Minitest::Test
       assert_match(/<w:bookmarkStart w:id="\d+" w:name="chapter-1"/, content_xml)
       assert_match(/<w:bookmarkStart w:id="\d+" w:name="chapter-2"/, content_xml)
       assert_match(/<w:updateFields w:val="true"\/>/, settings_xml)
+    end
+  end
+
+  def test_docx_places_toc_where_frontmatter_marker_appears
+    Dir.chdir(@tmp) do
+      File.write('quote.txt', "Opening Quote\n")
+      File.write('dramatis.md', "# Dramatis\n\n- Alice\n")
+
+      yaml_content = <<~YAML
+        :target_files:
+          - fixtures/story_lopez.txt
+          - fixtures/story_spacex.txt
+        :frontmatter:
+          - quote.txt
+          - :TOC
+          - dramatis.md
+        :title: Test Novel
+        :author: Test Author
+        :target_words: 1000
+        :chapter_head_tag: '** chapter'
+        :date_start: '1 Jan 1970'
+      YAML
+      File.write('.rakefile.yaml', yaml_content)
+
+      out = `rake interleave_doc 2>&1`
+
+      assert $?.success?, 'rake interleave_doc should succeed'
+      refute_match(/:TOC not specified in :frontmatter/, out)
+
+      content_xml = extract_docx_content(Dir['*_draft_0.docx'].first)
+
+      assert content_xml.index('Test Author') < content_xml.index('Opening Quote')
+      assert content_xml.index('Opening Quote') < content_xml.index('DOCX_TOC_INSERT')
+      assert content_xml.index('DOCX_TOC_INSERT') < content_xml.index('Dramatis')
+      assert content_xml.index('Dramatis') < content_xml.index('Act 1')
     end
   end
 

@@ -62,6 +62,48 @@ class InterleaveTest < Minitest::Test
     end
   end
 
+  def test_interleave_html_allows_long_italics
+    Dir.chdir(@tmp) do
+      File.write('fixtures/long_italics.txt', <<~TEXT)
+        ** chapter 1: first
+        _I will tries all the winds, and mark all the stars gliding through the silent sky._
+      TEXT
+      File.write('.rakefile.yaml', <<~YAML)
+        :target_files:
+          - fixtures/long_italics.txt
+        :title: Long Italics Test
+        :target_words: 100
+        :date_start: '2026-03-02'
+        :chapter_head_tag: '** chapter'
+      YAML
+
+      out = `rake interleave_html 2>&1`
+
+      assert $?.success?, out
+      html = File.read(Dir['*_draft_0.html'].first)
+      assert_includes html, '<i>I will tries all the winds'
+    end
+  end
+
+  def test_single_source_interleave_omits_source_label
+    Dir.chdir(@tmp) do
+      File.write('.rakefile.yaml', <<~YAML)
+        :target_files:
+          - fixtures/story_lopez.txt
+        :title: Single Source Test
+        :target_words: 100
+        :date_start: '2026-03-02'
+        :chapter_head_tag: '** chapter'
+      YAML
+
+      system('rake interleave_html') or raise 'rake failed'
+      out = File.read(Dir['*_draft_0.html'].first)
+
+      assert_match(/chapter 1: One/, out)
+      refute_match(/\(LOPEZ 1\)/, out)
+    end
+  end
+
   def test_interleave_prepends_single_frontmatter_file
     Dir.chdir(@tmp) do
       File.write('front.txt', "Dramatis Personae\nAlice\n")
@@ -266,6 +308,35 @@ class InterleaveTest < Minitest::Test
     end
   end
 
+  def test_ichv_ignores_markdown_frontmatter_bullets
+    Dir.chdir(@tmp) do
+      File.write('dramatis.md', <<~MD)
+        # Dramatis Personae
+
+        * Cole Halvorsen -- mayor of Amarillo
+        * Alice Example
+      MD
+      File.write('.rakefile.yaml', <<~YAML)
+        :target_files:
+          - fixtures/story_lopez.txt
+          - fixtures/story_spacex.txt
+        :frontmatter:
+          - dramatis.md
+        :title: Frontmatter Bullet Test
+        :target_words: 100
+        :date_start: '2026-03-02'
+        :chapter_head_tag: '** chapter'
+      YAML
+
+      out = `rake ichv 2>&1`
+
+      assert $?.success?, out
+      refute_match(/SYNTAX ERROR/, out)
+      refute_match(/Dramatis Personae|Cole Halvorsen/, out)
+      assert_match(/\| interleaved/, out.gsub(/\e\[[0-9;]*m/, ""))
+    end
+  end
+
   def test_interleave_renumbers_chapter_with_parenthetical_before_colon
     Dir.chdir(@tmp) do
       File.write('fixtures/story_a.txt', <<~TEXT)
@@ -465,7 +536,7 @@ class InterleaveTest < Minitest::Test
     end
   end
 
-  def test_renumber_aborts_when_source_file_has_git_diff
+  def test_renumber_allows_source_file_with_git_diff
     Dir.chdir(@tmp) do
       File.write('fixtures/story_a.txt', <<~TEXT)
         ** chapter 7: first
@@ -488,8 +559,10 @@ class InterleaveTest < Minitest::Test
 
       File.open('fixtures/story_a.txt', 'a') { |f| f.puts "dirty edit" }
 
-      refute system('rake renumber'), 'rake renumber should fail when target file has git diff'
-      assert_match(/dirty edit/, File.read('fixtures/story_a.txt'))
+      system('rake renumber') or raise 'rake renumber should allow target file with git diff'
+      out = File.read('fixtures/story_a.txt')
+      assert_match(/^\*\* chapter 1: first$/m, out)
+      assert_match(/dirty edit/, out)
     end
   end
 

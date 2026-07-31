@@ -22,6 +22,59 @@ require 'tempfile'
 require 'tmpdir'
 require 'yaml'
 
+def yaml_config_key_name(node)
+  return node.value.to_s.sub(/\A:/, "") if node.is_a?(Psych::Nodes::Scalar)
+
+  node.to_s
+end
+
+def duplicate_yaml_config_keys(node, path = [])
+  duplicates = []
+
+  case node
+  when Psych::Nodes::Document
+    duplicates.concat(duplicate_yaml_config_keys(node.root, path)) if node.root
+  when Psych::Nodes::Mapping
+    seen = {}
+    node.children.each_slice(2) do |key_node, value_node|
+      key = yaml_config_key_name(key_node)
+      location = key_node.respond_to?(:start_line) ? key_node.start_line + 1 : nil
+      full_key = (path + [key]).join(".")
+
+      if seen.key?(key)
+        duplicates << {
+          :key => full_key,
+          :first_line => seen[key],
+          :line => location
+        }
+      else
+        seen[key] = location
+      end
+
+      duplicates.concat(duplicate_yaml_config_keys(value_node, path + [key]))
+    end
+  when Psych::Nodes::Sequence
+    node.children.each { |child| duplicates.concat(duplicate_yaml_config_keys(child, path)) }
+  end
+
+  duplicates
+end
+
+def load_rakefile_config(path)
+  parsed = Psych.parse_file(path)
+  duplicates = duplicate_yaml_config_keys(parsed)
+  unless duplicates.empty?
+    details = duplicates.map do |dup|
+      line_text = dup[:line] ? "line #{dup[:line]}" : "unknown line"
+      first_line_text = dup[:first_line] ? "first seen on line #{dup[:first_line]}" : "first occurrence line unknown"
+      "  - #{dup[:key]} duplicated at #{line_text} (#{first_line_text})"
+    end.join("\n")
+    abort "*** ERROR: duplicate keys in #{path}:\n#{details}"
+  end
+
+  YAML.load_file(path)
+end
+
 class Numeric
   # from
   #   http://pleac.sourceforge.net/pleac_ruby/numbers.html
@@ -38,7 +91,7 @@ end
 ## read config file#
 configfile = "./.rakefile.yaml"
 if FileTest.exist?(configfile)
-  config  = YAML.load_file(configfile)
+  config  = load_rakefile_config(configfile)
 else
   config  = { :target_files => ["story.txt"],
               :title =>"unknown title",
@@ -102,6 +155,14 @@ def get_target_content(files, git_hash = nil)
   content
 end
 
+def content_text_and_line_sources(content)
+  if content.is_a?(Hash)
+    [content[:text] || content["text"] || "", content[:line_sources] || content["line_sources"] || {}]
+  else
+    [content.to_s, {}]
+  end
+end
+
 def get_chapter_hash(config, git_hash, target_files = $target_files, content_by_file = nil)
 
   chapter_head_tag = config[:chapter_head_tag] || "== chapter"
@@ -116,7 +177,7 @@ def get_chapter_hash(config, git_hash, target_files = $target_files, content_by_
   
   target_files.each do |file|
     if content_by_file && content_by_file.key?(file)
-      contents = content_by_file[file]
+      contents, = content_text_and_line_sources(content_by_file[file])
     elsif git_hash
       contents = `git show #{git_hash}:#{file}`
     else
@@ -267,7 +328,8 @@ def print_chapter_report(title, config, ret, target_files = $target_files, conte
     
     # Parse acts for this file to track act boundaries
     file_data = if content_by_file && content_by_file.key?(file)
-      parse_chapters_and_acts_from_contents(content_by_file[file], file, config)
+      contents, line_sources = content_text_and_line_sources(content_by_file[file])
+      parse_chapters_and_acts_from_contents(contents, file, config, line_sources)
     else
       parse_chapters_and_acts_from_file(file, config)
     end
@@ -615,6 +677,14 @@ def default_docx_styles
         "spacing_before_points" => 0,
         "spacing_after_points" => 0
       },
+      "frontmatter_timeline" => {
+        "size" => 10,
+        "bold" => false,
+        "align" => "left",
+        "first_line_indent_inches" => 0,
+        "spacing_after_points" => 0,
+        "line_spacing" => "single"
+      },
       "title_page_title" => {
         "size" => 36,
         "bold" => true,
@@ -788,6 +858,7 @@ def default_reference_styles_xml(styles = default_docx_styles)
   heading_2 = docx_style(styles, "heading_2")
   frontmatter_heading_1 = docx_style(styles, "frontmatter_heading_1")
   frontmatter_heading_2 = docx_style(styles, "frontmatter_heading_2")
+  frontmatter_timeline = docx_style(styles, "frontmatter_timeline")
   title = docx_style(styles, "title_page_title")
   author = docx_style(styles, "title_page_author")
   normal_size = docx_points_to_half_points(normal["size"])
@@ -805,6 +876,9 @@ def default_reference_styles_xml(styles = default_docx_styles)
   frontmatter_heading_2_size = docx_points_to_half_points(frontmatter_heading_2["size"])
   frontmatter_heading_2_before = docx_spacing_twips(frontmatter_heading_2, "spacing_before") || 0
   frontmatter_heading_2_after = docx_spacing_twips(frontmatter_heading_2, "spacing_after") || 0
+  frontmatter_timeline_size = docx_points_to_half_points(frontmatter_timeline["size"])
+  frontmatter_timeline_after = docx_spacing_twips(frontmatter_timeline, "spacing_after") || 0
+  frontmatter_timeline_line = docx_line_spacing_twips(frontmatter_timeline)
   title_size = docx_points_to_half_points(title["size"])
   title_before = docx_spacing_twips(title, "spacing_before") || 4320
   title_after = docx_spacing_twips(title, "spacing_after") || 0
@@ -915,6 +989,24 @@ def default_reference_styles_xml(styles = default_docx_styles)
           <w:color w:val="#{color}"/>
           <w:sz w:val="#{frontmatter_heading_2_size}"/>
           <w:szCs w:val="#{frontmatter_heading_2_size}"/>
+        </w:rPr>
+      </w:style>
+      <w:style w:type="paragraph" w:styleId="FrontmatterTimeline">
+        <w:name w:val="Frontmatter Timeline"/>
+        <w:basedOn w:val="Normal"/>
+        <w:next w:val="FrontmatterTimeline"/>
+        <w:qFormat/>
+        <w:pPr>
+          #{docx_align_xml(frontmatter_timeline)}
+          #{docx_first_line_indent_xml(frontmatter_timeline)}
+          <w:spacing w:after="#{frontmatter_timeline_after}" w:line="#{frontmatter_timeline_line}" w:lineRule="auto"/>
+        </w:pPr>
+        <w:rPr>
+          <w:rFonts w:ascii="#{font}" w:hAnsi="#{font}" w:eastAsia="#{font}" w:cs="#{font}"/>
+          #{docx_bold_xml(frontmatter_timeline)}
+          <w:color w:val="#{color}"/>
+          <w:sz w:val="#{frontmatter_timeline_size}"/>
+          <w:szCs w:val="#{frontmatter_timeline_size}"/>
         </w:rPr>
       </w:style>
       <w:style w:type="paragraph" w:styleId="TitlePageTitle">
@@ -1569,10 +1661,37 @@ def make_commit_message(git_hash = nil)
   "#{$title} : #{actual_words.commify} / #{$target_words&.commify} words ( #{sprintf('%0.2f', percent_words * 100)} % )"
 end
 
-desc "git add . && git commit -m <message> -- message uses same X / Y words (Z%) logic"
-task :git do
+def with_eastern_timezone
+  old_tz = ENV["TZ"]
+  ENV["TZ"] = "America/New_York"
+  yield
+ensure
+  ENV["TZ"] = old_tz
+end
+
+def git_date_at_eastern_5pm(date)
+  with_eastern_timezone do
+    Time.local(date.year, date.month, date.day, 17, 0, 0).strftime("%Y-%m-%d %H:%M:%S %z")
+  end
+end
+
+def git_date_for_days_offset(days_offset)
+  return nil if !days_offset || days_offset.strip == ""
+
+  offset = Integer(days_offset)
+  abort "days_offset must be negative, e.g. rake 'git[-1]'" unless offset < 0
+
+  git_date_at_eastern_5pm(with_eastern_timezone { Date.today + offset })
+rescue ArgumentError
+  abort "days_offset must be a negative integer, e.g. rake 'git[-1]'"
+end
+
+desc "git add . && git commit -m <message>. Optional negative days offset: rake 'git[-1]'"
+task :git, [:days_offset] do |t, args|
   msg = make_commit_message
+  date_arg = git_date_for_days_offset(args[:days_offset])
   puts "Committing with message: #{msg}"
+  puts "Commit date: #{date_arg}" if date_arg
   system("git", "add", ".")
 
   # only commit if there are changes to commit
@@ -1580,7 +1699,11 @@ task :git do
   if changed.strip == ""
     puts "No changes to commit."
   else
-    system("git", "commit", "-m", msg)
+    env = date_arg ? { "GIT_AUTHOR_DATE" => date_arg, "GIT_COMMITTER_DATE" => date_arg } : {}
+    args = ["commit"]
+    args.push("--date", date_arg) if date_arg
+    args.push("-m", msg)
+    system(env, "git", *args)
   end
 end
 
@@ -1597,10 +1720,7 @@ task :git_change_date, [:date_str] do |t, args|
     abort "Error parsing date: #{e}"
   end
 
-  # set time to 5pm Eastern Time (offset -05:00). If DST handling is required,
-  # consider using the 'tzinfo' gem to compute the correct offset for the date.
-  ts = Time.new(parsed.year, parsed.month, parsed.day, 17, 0, 0, "-05:00")
-  date_arg = ts.strftime("%Y-%m-%d %H:%M:%S %z")
+  date_arg = git_date_at_eastern_5pm(parsed)
 
   puts "Amending most recent commit with date: #{date_arg}"
 
@@ -1752,10 +1872,10 @@ end
 
 desc "Renumber chapters in each source file by act"
 task :renumber do
-  dirty_files = $target_files.reject { |file| target_file_clean_in_git?(file) }
-  unless dirty_files.empty?
-    abort "*** ERROR: refusing to renumber because these source files are not clean in git: #{dirty_files.join(', ')}"
-  end
+  # dirty_files = $target_files.reject { |file| target_file_clean_in_git?(file) }
+  # unless dirty_files.empty?
+  #   abort "*** ERROR: refusing to renumber because these source files are not clean in git: #{dirty_files.join(', ')}"
+  # end
 
   $target_files.each do |file|
     abort "*** ERROR: target file #{file} not found" unless File.exist?(file)
@@ -1765,12 +1885,13 @@ task :renumber do
   end
 end
 
-def parse_chapters_and_acts_from_contents(contents, file_path, config)
+def parse_chapters_and_acts_from_contents(contents, file_path, config, line_sources = {})
   chapter_head_tag = config[:chapter_head_tag] || "== chapter"
   lines = contents.split("\n")
   before_first_act = true
   leading_xxx_lines = []
   cleaned_lines = []
+  cleaned_line_sources = []
   source_id = extract_source_id(file_path)
 
   idx = 0
@@ -1784,11 +1905,12 @@ def parse_chapters_and_acts_from_contents(contents, file_path, config)
         comment_lines << lines[idx]
         idx += 1
       end
-      leading_xxx_lines << { :line => reflow_xxx_comment(comment_lines), :source_id => source_id }
+      leading_xxx_lines << { :line => reflow_xxx_comment(comment_lines), :source_id => source_id, :source_file => file_path }
       next
     end
 
     cleaned_lines << line
+    cleaned_line_sources << (line_sources[idx + 1] || file_path)
     idx += 1
   end
 
@@ -1808,10 +1930,11 @@ def parse_chapters_and_acts_from_contents(contents, file_path, config)
       # Line starts with single asterisk
       if line !~ /^\* Act /
         bytes = line.bytes.map { |b| sprintf("%02x", b) }.join(' ')
+        source_path = cleaned_line_sources[idx] || file_path
         if line =~ /chapter/i
-          abort "*** SYNTAX ERROR in #{file_path}: Line #{lineno}: starts with '*' but not followed by 'Act': #{line.inspect}\n  bytes: #{bytes}\n  Hint: did you forget an extra asterisk for the chapter?"
+          abort "*** SYNTAX ERROR in #{source_path}: Line #{lineno}: starts with '*' but not followed by 'Act': #{line.inspect}\n  bytes: #{bytes}\n  Hint: did you forget an extra asterisk for the chapter?"
         else
-          abort "*** SYNTAX ERROR in #{file_path}: Line #{lineno}: starts with '*' but not followed by 'Act': #{line.inspect}\n  bytes: #{bytes}"
+          abort "*** SYNTAX ERROR in #{source_path}: Line #{lineno}: starts with '*' but not followed by 'Act': #{line.inspect}\n  bytes: #{bytes}"
         end
       end
       # Valid Act line - will be associated with the next chapter we see
@@ -2240,7 +2363,7 @@ def build_interleaved_data(all_data, all_acts, max_chapter, pragma_registry = ni
     act_markers_by_chapter_id[chapter_id].each do |act_data|
       next if seen_act_lines.include?(act_data[:line])
 
-      interleaved << { :type => :act, :line => act_data[:line] }
+      interleaved << { :type => :act, :line => act_data[:line], :source_file => file }
       seen_act_lines.add(act_data[:line])
     end
     
@@ -2251,10 +2374,11 @@ def build_interleaved_data(all_data, all_acts, max_chapter, pragma_registry = ni
     # Augment the chapter header with source identifier/original chapter and renumber to sequential
     augmented_text = chapter_data[:full_text].dup
     augmented_text.sub!(/^(\*\*\s*chapter\s+)(\d+)([^:\n]*:)/i) do
-      "#{$1}#{sequential_chapter_num} (#{source_id} #{$2})#{$3}"
+      source_label = $target_files.size > 1 ? " (#{source_id} #{$2})" : ""
+      "#{$1}#{sequential_chapter_num}#{source_label}#{$3}"
     end
 
-    interleaved << { :type => :chapter, :text => augmented_text, :chapter_id => chapter_id, :sequential_num => sequential_chapter_num }
+    interleaved << { :type => :chapter, :text => augmented_text, :chapter_id => chapter_id, :sequential_num => sequential_chapter_num, :source_file => file }
   end
 
   interleaved
@@ -2346,8 +2470,7 @@ def validate_pragma_constraints_in_output(interleaved, pragma_registry, all_data
 end
 
 # Process underscores for italics, converting _text_ to <i>text</i>
-# Validates that: italics don't have unintended underscores mid-alphanumeric
-# and that italicized text is <= 40 characters
+# Validates that italics don't have unintended underscores mid-alphanumeric.
 def process_italics_for_html(text)
   result = ""
   i = 0
@@ -2380,11 +2503,6 @@ def process_italics_for_html(text)
         # Extract italicized content
         italic_content = text[i+1...close_idx]
         
-        # Check length
-        if italic_content.length > 40
-          abort "*** SYNTAX ERROR: Italicized text is #{italic_content.length} characters (max 40 allowed), likely missing closing underscore:\n  #{italic_content[0..50]}..."
-        end
-        
         # Check for closing underscore surrounded by alphanumerics
         next_after_close = close_idx < text.length - 1 ? text[close_idx + 1] : nil
         if next_char&.match?(/[a-zA-Z0-9]/) && next_after_close&.match?(/[a-zA-Z0-9]/)
@@ -2415,6 +2533,41 @@ def frontmatter_files(config)
   Array(configured).compact
 end
 
+def frontmatter_toc_marker?(entry)
+  return false if entry.is_a?(Hash)
+
+  value = entry.is_a?(Symbol) ? entry.to_s : entry.to_s.strip
+  value.sub(/\A:/, "").casecmp("toc").zero?
+end
+
+def frontmatter_entry_file(entry)
+  return entry unless entry.is_a?(Hash)
+
+  stringify_yaml_keys(entry)["file"]
+end
+
+def frontmatter_entry_style(entry)
+  return nil unless entry.is_a?(Hash)
+
+  stringify_yaml_keys(entry)["style"]
+end
+
+def frontmatter_timeline_entry?(entry)
+  frontmatter_entry_style(entry).to_s.casecmp("timeline").zero?
+end
+
+def frontmatter_file_entries(config)
+  frontmatter_files(config).reject { |entry| frontmatter_toc_marker?(entry) }
+end
+
+def frontmatter_has_toc_marker?(config)
+  frontmatter_files(config).any? { |entry| frontmatter_toc_marker?(entry) }
+end
+
+def frontmatter_toc_marker_count(config)
+  frontmatter_files(config).count { |entry| frontmatter_toc_marker?(entry) }
+end
+
 def markdown_file?(file)
   [".md", ".markdown"].include?(File.extname(file).downcase)
 end
@@ -2426,7 +2579,7 @@ def read_frontmatter_file(file)
 end
 
 def frontmatter_text(config)
-  contents = frontmatter_files(config).map { |file| read_frontmatter_file(file).strip }.reject(&:empty?)
+  contents = frontmatter_file_entries(config).map { |entry| read_frontmatter_file(frontmatter_entry_file(entry)).strip }.reject(&:empty?)
   return "" if contents.empty?
 
   contents.join("\n\n") + "\n\n"
@@ -2460,7 +2613,7 @@ def normalize_markdown_frontmatter(contents)
 end
 
 def markdown_file_to_html(file)
-  IO.popen(["pandoc", "-f", "markdown", "-t", "html"], "r+") do |io|
+  IO.popen(["pandoc", "-f", "markdown+hard_line_breaks", "-t", "html"], "r+") do |io|
     io.write(normalize_markdown_frontmatter(read_frontmatter_file(file)))
     io.close_write
     html = io.read
@@ -2480,7 +2633,8 @@ def plain_text_to_html(text)
 end
 
 def frontmatter_html(config)
-  html_parts = frontmatter_files(config).map do |file|
+  html_parts = frontmatter_file_entries(config).map do |entry|
+    file = frontmatter_entry_file(entry)
     contents = read_frontmatter_file(file)
     markdown_file?(file) ? markdown_file_to_html(file) : plain_text_to_html(contents)
   end.map(&:strip).reject(&:empty?)
@@ -2491,10 +2645,21 @@ def frontmatter_html(config)
 end
 
 def frontmatter_html_with_page_break_markers(config)
-  html_parts = frontmatter_files(config).each_with_index.map do |file, idx|
+  html_parts = []
+  frontmatter_files(config).each_with_index do |entry, idx|
+    if frontmatter_toc_marker?(entry)
+      html_parts << "<p>DOCX_TOC_INSERT</p>"
+      html_parts << "<p>DOCX_TOC_PAGE_BREAK</p>"
+      next
+    end
+
+    file = frontmatter_entry_file(entry)
     contents = read_frontmatter_file(file)
     html = markdown_file?(file) ? markdown_file_to_html(file) : plain_text_to_html(contents)
-    [html.strip, %(<p>DOCX_FRONTMATTER_PAGE_BREAK_#{idx}</p>)]
+    html_parts << "<p>DOCX_FRONTMATTER_TIMELINE_START</p>" if frontmatter_timeline_entry?(entry)
+    html_parts << html.strip
+    html_parts << "<p>DOCX_FRONTMATTER_TIMELINE_END</p>" if frontmatter_timeline_entry?(entry)
+    html_parts << %(<p>DOCX_FRONTMATTER_PAGE_BREAK_#{idx}</p>)
   end.flatten.reject(&:empty?)
 
   return "" if html_parts.empty?
@@ -2547,6 +2712,41 @@ def format_interleaved_as_text(interleaved, config = nil)
   output_lines.join("\n")
 end
 
+def append_text_with_line_source(lines, line_sources, text, source)
+  text.to_s.split("\n", -1).each do |line|
+    lines << line
+    line_sources[lines.size] = source
+  end
+end
+
+def format_interleaved_as_text_with_sources(interleaved, config = nil)
+  output_lines = []
+  line_sources = {}
+  files = config ? frontmatter_file_entries(config) : []
+  files.each_with_index do |file, idx|
+    source = frontmatter_entry_file(file)
+    append_text_with_line_source(output_lines, line_sources, "\n", source) if idx > 0
+    append_text_with_line_source(output_lines, line_sources, read_frontmatter_file(source), source)
+  end
+  append_text_with_line_source(output_lines, line_sources, "\n", "frontmatter") unless files.empty?
+
+  interleaved.each do |item|
+    source = item[:source_file] || "interleaved"
+    if item[:type] == :act
+      append_text_with_line_source(output_lines, line_sources, remove_arrows(item[:line]), source)
+      append_text_with_line_source(output_lines, line_sources, "", source)
+    elsif item[:type] == :xxx
+      append_text_with_line_source(output_lines, line_sources, remove_arrows(item[:line]), source)
+      append_text_with_line_source(output_lines, line_sources, "", source)
+    elsif item[:type] == :chapter
+      append_text_with_line_source(output_lines, line_sources, remove_arrows(item[:text]), source)
+      append_text_with_line_source(output_lines, line_sources, "", source)
+    end
+  end
+
+  { :text => output_lines.join("\n"), :line_sources => line_sources }
+end
+
 # Format interleaved data as HTML
 def format_interleaved_as_html(interleaved, config = nil, include_title_page = false, frontmatter_page_breaks = false, include_toc = false)
   require 'cgi'
@@ -2556,7 +2756,14 @@ def format_interleaved_as_html(interleaved, config = nil, include_title_page = f
     html_parts << title_page_html(config)
     html_parts << "<p>DOCX_TITLE_PAGE_BREAK</p>"
   end
-  if include_toc
+
+  if config && include_toc && frontmatter_toc_marker_count(config) > 1
+    abort "*** ERROR: :TOC may appear only once in :frontmatter"
+  end
+
+  toc_in_frontmatter = config && include_toc && frontmatter_has_toc_marker?(config)
+  if include_toc && !toc_in_frontmatter
+    puts ":TOC not specified in :frontmatter; adding in default location" if config
     html_parts << "<p>DOCX_TOC_INSERT</p>"
     html_parts << "<p>DOCX_TOC_PAGE_BREAK</p>"
   end
@@ -2645,7 +2852,7 @@ def build_interleaved_chapters_for_targets(config)
   interleaved = build_interleaved_data(all_data, all_acts, max_chapter, pragma_registry)
   unless leading_xxx_lines.empty?
     interleaved = leading_xxx_lines.map do |entry|
-      { :type => :xxx, :line => label_leading_xxx_line(entry[:line], entry[:source_id]) }
+      { :type => :xxx, :line => label_leading_xxx_line(entry[:line], entry[:source_id]), :source_file => entry[:source_file] }
     end + interleaved
   end
 
@@ -2674,7 +2881,7 @@ end
 def draft_output_basename(config)
   title = config[:title] || config["title"] || $title || "output"
   draft = config[:draft] || config["draft"] || 0
-  title_part = title.to_s.strip.gsub(/\s+/, "_").gsub(/[\/\\]/, "_")
+  title_part = title.to_s.strip.gsub(/\s+/, "_").gsub(/[\/\\]/, "_").delete(":")
   title_part = "output" if title_part == ""
 
   "#{title_part}_draft_#{draft}"
@@ -2792,15 +2999,15 @@ def print_interleaved_chapter_overview(config, hide_done)
   max_chapter = result[:max_chapter]
   pragma_registry = result[:pragma_registry]
   interleaved = result[:interleaved]
-  output_text = format_interleaved_as_text(interleaved, config)
+  output_info = format_interleaved_as_text_with_sources(interleaved, nil)
   output_name = "interleaved"
 
   puts "Built interleaved chapters in memory"
   print_interleave_summary(max_chapter)
   print_pragma_output_validation(interleaved, pragma_registry, all_data)
 
-  ret = get_chapter_hash(config, nil, [output_name], { output_name => output_text })
-  print_chapter_report("#{$title} (interleaved)", config, ret, [output_name], { output_name => output_text }, :always, hide_done)
+  ret = get_chapter_hash(config, nil, [output_name], { output_name => output_info })
+  print_chapter_report("#{$title} (interleaved)", config, ret, [output_name], { output_name => output_info }, :always, hide_done)
 end
 
 task :ich do
@@ -2820,13 +3027,28 @@ def default_docx_reference?(reference_file)
   File.basename(reference_file.to_s) == ".default.docx"
 end
 
+def docx_reference_has_style?(reference_file, style_id)
+  require 'zip'
+
+  Zip::File.open(reference_file) do |zip|
+    entry = zip.find_entry("word/styles.xml")
+    return false unless entry
+
+    entry.get_input_stream.read.include?(%(<w:style w:type="paragraph" w:styleId="#{style_id}"))
+  end
+rescue
+  false
+end
+
 def refresh_default_docx_reference_if_needed(config)
   reference_file = docx_reference_file(config)
   return unless default_docx_reference?(reference_file)
 
   styles_file = docx_styles_file(config)
   create_default_docx_styles_yaml(styles_file)
-  return if File.exist?(reference_file) && File.mtime(reference_file) >= File.mtime(styles_file)
+  return if File.exist?(reference_file) &&
+            File.mtime(reference_file) >= File.mtime(styles_file) &&
+            docx_reference_has_style?(reference_file, "FrontmatterTimeline")
 
   create_default_reference_docx(reference_file, true, styles_file)
 end
@@ -2927,6 +3149,30 @@ def style_docx_headings_before_manuscript(xml)
       paragraph
         .gsub(/<w:pStyle\s+w:val="Heading1"\s*\/>/, '<w:pStyle w:val="FrontmatterHeading1"/>')
         .gsub(/<w:pStyle\s+w:val="Heading2"\s*\/>/, '<w:pStyle w:val="FrontmatterHeading2"/>')
+    else
+      paragraph
+    end
+  end
+end
+
+def style_docx_timeline_frontmatter_regions(xml)
+  before_manuscript = true
+  timeline = false
+
+  xml.gsub(/<w:p\b.*?<\/w:p>/m) do |paragraph|
+    if paragraph.include?("DOCX_MANUSCRIPT_START")
+      before_manuscript = false
+      paragraph
+    elsif before_manuscript && paragraph.include?("DOCX_FRONTMATTER_TIMELINE_START")
+      timeline = true
+      ""
+    elsif before_manuscript && paragraph.include?("DOCX_FRONTMATTER_TIMELINE_END")
+      timeline = false
+      ""
+    elsif before_manuscript && timeline &&
+          !paragraph.include?("FrontmatterHeading1") &&
+          !paragraph.include?("FrontmatterHeading2")
+      set_docx_paragraph_style(paragraph, "FrontmatterTimeline")
     else
       paragraph
     end
@@ -3192,6 +3438,7 @@ def postprocess_docx_title_page(docx_file, config, interleaved = [])
     end
 
     xml = style_docx_headings_before_manuscript(xml)
+    xml = style_docx_timeline_frontmatter_regions(xml)
     xml = replace_docx_manuscript_boundary_markers(xml)
     zip.get_output_stream("word/document.xml") { |f| f.write(xml) }
     mark_docx_fields_for_update(zip)

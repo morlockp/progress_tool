@@ -16,6 +16,47 @@ class DefaultTaskTest < Minitest::Test
     FileUtils.remove_entry(@tmp) if @tmp && Dir.exist?(@tmp)
   end
 
+  def test_duplicate_rakefile_keys_abort_before_task_runs
+    Dir.chdir(@tmp) do
+      File.write('.rakefile.yaml', <<~YAML)
+        :target_files:
+          - story.txt
+        :title: First Title
+        :title: Second Title
+        :target_words: 1000
+        :date_start: '2026-03-02'
+        :chapter_head_tag: '** chapter'
+      YAML
+
+      out = `rake default 2>&1`
+
+      refute $?.success?, 'rake should fail for duplicate config keys'
+      assert_match(/\*\*\* ERROR: duplicate keys in \.\/\.rakefile\.yaml/, out)
+      assert_match(/title duplicated at line 4 \(first seen on line 3\)/, out)
+    end
+  end
+
+  def test_duplicate_rakefile_keys_abort_for_symbol_and_plain_key_variants
+    Dir.chdir(@tmp) do
+      File.write('.rakefile.yaml', <<~YAML)
+        :target_files:
+          - story.txt
+        :frontmatter:
+          - dramatis.txt
+        frontmatter: []
+        :title: Test Novel
+        :target_words: 1000
+        :date_start: '2026-03-02'
+        :chapter_head_tag: '** chapter'
+      YAML
+
+      out = `rake default 2>&1`
+
+      refute $?.success?, 'rake should fail for equivalent duplicate config keys'
+      assert_match(/frontmatter duplicated at line 5 \(first seen on line 3\)/, out)
+    end
+  end
+
   def test_default_book_split_uses_act_aware_diff_counts
     Dir.chdir(@tmp) do
       File.write('story.txt', <<~TEXT)
