@@ -120,6 +120,7 @@ class DefaultTaskTest < Minitest::Test
 
       config = YAML.load_file('.rakefile.yaml')
       assert_equal [], config[:frontmatter]
+      assert_equal [], config[:aftermatter]
       assert_equal '.default.docx', config[:docx_reference]
       assert_equal '.docx_styles.yaml', config[:docx_styles]
       assert_equal 'author goes here', config[:author]
@@ -128,33 +129,49 @@ class DefaultTaskTest < Minitest::Test
       assert File.exist?('.default.docx')
 
       docx_styles = YAML.load_file('.docx_styles.yaml')
-      assert_equal 'Times New Roman', docx_styles['font']
-      assert_equal 12, docx_styles['styles']['normal']['size']
-      assert_equal 30, docx_styles['styles']['heading_1']['size']
+      assert_equal 'Garamond', docx_styles['font']
+      assert_equal 6, docx_styles['page']['width_inches']
+      assert_equal 9, docx_styles['page']['height_inches']
+      assert_equal 11, docx_styles['styles']['normal']['size']
+      assert_equal 40, docx_styles['styles']['heading_1']['size']
       assert_equal 36, docx_styles['styles']['title_page_title']['size']
       assert_equal 20, docx_styles['styles']['title_page_author']['size']
-      assert_equal 'double', docx_styles['styles']['normal']['line_spacing']
-      assert_equal 0.5, docx_styles['styles']['normal']['first_line_indent_inches']
+      assert_equal 'single', docx_styles['styles']['normal']['line_spacing']
+      assert_equal 0.2, docx_styles['styles']['normal']['first_line_indent_inches']
       assert_equal true, docx_styles['page_numbers']['enabled']
+      assert_equal 'footer', docx_styles['page_numbers']['position']
+      assert File.exist?(File.join('assets', 'morlock_publishing_logo.png'))
 
       styles_xml = extract_docx_file('.default.docx', 'word/styles.xml')
       document_xml = extract_docx_file('.default.docx', 'word/document.xml')
-      header_xml = extract_docx_file('.default.docx', 'word/header1.xml')
+      settings_xml = extract_docx_file('.default.docx', 'word/settings.xml')
+      footer_odd_xml = extract_docx_file('.default.docx', 'word/footer1.xml')
+      footer_even_xml = extract_docx_file('.default.docx', 'word/footer2.xml')
       rels_xml = extract_docx_file('.default.docx', 'word/_rels/document.xml.rels')
-      assert_match(/w:ascii="Times New Roman"/, styles_xml)
+      assert_match(/w:ascii="Garamond"/, styles_xml)
       assert_match(/w:color w:val="000000"/, styles_xml)
-      assert_match(/w:style w:type="paragraph" w:default="1" w:styleId="Normal".*?<w:jc w:val="left"\/>.*?<w:ind w:firstLine="720"\/>.*?w:line="480".*?w:sz w:val="24"/m, styles_xml)
-      assert_match(/w:style w:type="paragraph" w:styleId="Heading1".*?<w:b\/>.*?w:sz w:val="60"/m, styles_xml)
-      assert_match(/w:style w:type="paragraph" w:styleId="Heading2".*?<w:b\/>.*?w:sz w:val="24"/m, styles_xml)
+      assert_match(/w:style w:type="paragraph" w:default="1" w:styleId="Normal".*?<w:jc w:val="left"\/>.*?<w:ind w:firstLine="288"\/>.*?w:line="240".*?w:sz w:val="22"/m, styles_xml)
+      assert_match(/w:style w:type="paragraph" w:styleId="BodyText".*?<w:ind w:firstLine="288"\/>.*?w:sz w:val="22"/m, styles_xml)
+      assert_match(/w:style w:type="paragraph" w:styleId="FirstParagraph".*?<w:ind w:firstLine="0"\/>.*?w:sz w:val="22"/m, styles_xml)
+      assert_match(/w:style w:type="paragraph" w:styleId="Compact".*?<w:ind w:firstLine="0"\/>.*?w:after="0"/m, styles_xml)
+      assert_match(/w:style w:type="paragraph" w:styleId="Heading1".*?<w:b\/>.*?w:sz w:val="80"/m, styles_xml)
+      assert_match(/w:style w:type="paragraph" w:styleId="Heading2".*?<w:b\/>.*?w:sz w:val="30"/m, styles_xml)
       assert_match(/w:style w:type="paragraph" w:styleId="FrontmatterHeading1".*?<w:b\/>.*?w:sz w:val="24"/m, styles_xml)
       assert_match(/w:style w:type="paragraph" w:styleId="FrontmatterHeading2".*?<w:b\/>.*?w:sz w:val="24"/m, styles_xml)
-      assert_match(/w:style w:type="paragraph" w:styleId="TitlePageTitle".*?w:spacing w:before="4320".*?<w:b\/>.*?w:sz w:val="72"/m, styles_xml)
+      assert_match(/w:style w:type="paragraph" w:styleId="TitlePageTitle".*?w:spacing w:before="2880".*?<w:b\/>.*?w:sz w:val="72"/m, styles_xml)
       assert_match(/w:style w:type="paragraph" w:styleId="TitlePageAuthor".*?w:spacing w:before="1440".*?<w:b\/>.*?w:sz w:val="40"/m, styles_xml)
-      assert_match(/w:pgSz w:w="12240" w:h="15840"/, document_xml)
-      assert_match(/w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/, document_xml)
-      assert_match(/w:headerReference w:type="default" r:id="rIdHeader1"/, document_xml)
-      assert_match(/PAGE/, header_xml)
-      assert_match(/Target="header1.xml"/, rels_xml)
+      assert_match(/w:style w:type="paragraph" w:styleId="TitlePageTitle".*?<w:suppressAutoHyphens\s*\/>/m, styles_xml)
+      assert_match(/w:style w:type="paragraph" w:styleId="TitlePageAuthor".*?<w:suppressAutoHyphens\s*\/>/m, styles_xml)
+      assert_match(/w:pgSz w:w="8640" w:h="12960"/, document_xml)
+      assert_match(/w:pgMar w:top="1138" w:right="1138" w:bottom="1426" w:left="1138"/, document_xml)
+      assert_match(/w:footerReference w:type="default" r:id="rIdFooterOdd"/, document_xml)
+      assert_match(/w:footerReference w:type="even" r:id="rIdFooterEven"/, document_xml)
+      assert_match(/w:mirrorMargins/, settings_xml)
+      assert_match(/w:evenAndOddHeaders/, settings_xml)
+      assert_match(/PAGE/, footer_odd_xml)
+      assert_match(/PAGE/, footer_even_xml)
+      assert_match(/Target="footer1.xml"/, rels_xml)
+      assert_match(/Target="footer2.xml"/, rels_xml)
     end
   end
 
@@ -187,6 +204,7 @@ class DefaultTaskTest < Minitest::Test
       assert_match(/TitlePageTitle/, styles_xml)
       assert_match(/w:ascii="Courier New"/, styles_xml)
       assert_match(/w:style w:type="paragraph" w:styleId="TitlePageTitle".*?w:sz w:val="56"/m, styles_xml)
+      assert_match(/w:style w:type="paragraph" w:styleId="TitlePageTitle".*?<w:suppressAutoHyphens\s*\/>/m, styles_xml)
     end
   end
 

@@ -152,6 +152,29 @@ class InterleaveTest < Minitest::Test
     end
   end
 
+  def test_interleave_appends_aftermatter_file
+    Dir.chdir(@tmp) do
+      File.write('after.md', "# About the Author\n\nBio text.\n")
+      File.write('.rakefile.yaml', <<~YAML)
+        :target_files:
+          - fixtures/story_lopez.txt
+          - fixtures/story_spacex.txt
+        :aftermatter:
+          - after.md
+        :title: Aftermatter Test
+        :target_words: 100
+        :date_start: '2026-03-02'
+        :chapter_head_tag: '** chapter'
+      YAML
+
+      system('rake interleave_txt') or raise 'rake failed'
+      out = File.read(Dir['*_draft_0.txt'].first)
+
+      assert out.index("** chapter") < out.index("# About the Author")
+      assert out.end_with?("# About the Author\n\nBio text.\n\n")
+    end
+  end
+
   def test_interleave_collects_xxx_lines_before_first_act
     Dir.chdir(@tmp) do
       File.write('fixtures/story_a.txt', <<~TEXT)
