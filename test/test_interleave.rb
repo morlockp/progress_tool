@@ -85,6 +85,63 @@ class InterleaveTest < Minitest::Test
     end
   end
 
+  def test_interleave_html_formats_opening_blockquote_as_chapter_epigraph
+    Dir.chdir(@tmp) do
+      File.write('fixtures/epigraph.txt', <<~TEXT)
+        ** chapter 1: The Great Project
+
+        > So great a task it was to found a people.
+        > —Virgil, _Aeneid_ 1.33
+
+        The chapter begins here.
+      TEXT
+      File.write('.rakefile.yaml', <<~YAML)
+        :target_files:
+          - fixtures/epigraph.txt
+        :title: Epigraph Test
+        :target_words: 100
+        :date_start: '2026-08-28'
+        :chapter_head_tag: '** chapter'
+      YAML
+
+      system('rake interleave_html') or raise 'rake failed'
+      html = File.read(Dir['*_draft_0.html'].first)
+
+      assert_includes html, '<h2 id="chapter-1">chapter 1: The Great Project</h2>'
+      assert_includes html, '<div custom-style="ChapterEpigraph"><p>So great a task it was to found a people.</p></div>'
+      assert_includes html, '<div custom-style="ChapterEpigraphAttribution"><p>—Virgil, <i>Aeneid</i> 1.33</p></div>'
+      refute_includes html, '> So great a task it was to found a people.'
+    end
+  end
+
+  def test_scene_markers_default_to_dinkuses_and_can_remain_headings
+    Dir.chdir(@tmp) do
+      File.write('fixtures/scene_marker.txt', "** chapter 1: Test\n\nBefore.\n\n*** scene 1: Arrival\n\n*** transition: The next day\n\nAfter.\n")
+      config = <<~YAML
+        :target_files:
+          - fixtures/scene_marker.txt
+        :title: Scene Marker Test
+        :target_words: 100
+        :date_start: '2026-08-28'
+        :chapter_head_tag: '** chapter'
+      YAML
+      File.write('.rakefile.yaml', config)
+
+      assert system('rake interleave_txt interleave_html'), 'rake failed'
+      assert_includes File.read('Scene_Marker_Test_draft_0.txt'), "* * *"
+      refute_includes File.read('Scene_Marker_Test_draft_0.txt'), "*** scene 1: Arrival"
+      refute_includes File.read('Scene_Marker_Test_draft_0.txt'), "*** transition: The next day"
+      assert_includes File.read('Scene_Marker_Test_draft_0.html'), '<div custom-style="Dinkus"><p>* * *</p></div>'
+
+      File.write('.rakefile.yaml', "#{config}:scene_markers: heading\n")
+      assert system('rake interleave_txt interleave_html'), 'rake failed'
+      assert_includes File.read('Scene_Marker_Test_draft_0.txt'), "*** scene 1: Arrival"
+      assert_includes File.read('Scene_Marker_Test_draft_0.txt'), "*** transition: The next day"
+      assert_includes File.read('Scene_Marker_Test_draft_0.html'), "<h3>scene 1: Arrival</h3>"
+      assert_includes File.read('Scene_Marker_Test_draft_0.html'), "<h3>transition: The next day</h3>"
+    end
+  end
+
   def test_single_source_interleave_omits_source_label
     Dir.chdir(@tmp) do
       File.write('.rakefile.yaml', <<~YAML)
@@ -159,7 +216,7 @@ class InterleaveTest < Minitest::Test
         :target_files:
           - fixtures/story_lopez.txt
           - fixtures/story_spacex.txt
-        :aftermatter:
+        :aftermatter_other:
           - after.md
         :title: Aftermatter Test
         :target_words: 100
@@ -619,6 +676,52 @@ YAML
 
       # expect rake task to fail due to invalid '*' line
       refute system('rake interleave_txt'), 'rake should fail for invalid "*" lines'
+    end
+  end
+
+  def test_scene_break_star_line_is_allowed
+    Dir.chdir(@tmp) do
+      File.write('fixtures/scene_break.txt', <<~TEXT)
+        ** chapter 1: first
+        before
+        * * *
+        after
+      TEXT
+      File.write('.rakefile.yaml', <<~YAML)
+:target_files:
+  - fixtures/scene_break.txt
+:title: "Scene Break"
+:target_words: 1000
+:date_start: '2026-08-09'
+:chapter_head_tag: '** chapter'
+YAML
+
+      assert system('rake interleave_txt interleave_html'), 'rake should allow manuscript scene breaks'
+      out = File.read('Scene_Break_draft_0.txt')
+      assert_match(/^\* \* \*$/m, out)
+      assert_includes File.read('Scene_Break_draft_0.html'), '<div custom-style="Dinkus"><p>* * *</p></div>'
+    end
+  end
+
+  def test_lowercase_act_line_is_allowed
+    Dir.chdir(@tmp) do
+      File.write('fixtures/lowercase_act.txt', <<~TEXT)
+        * act 1
+        ** chapter 1: first
+        before
+      TEXT
+      File.write('.rakefile.yaml', <<~YAML)
+:target_files:
+  - fixtures/lowercase_act.txt
+:title: "Lowercase Act"
+:target_words: 1000
+:date_start: '2026-08-09'
+:chapter_head_tag: '** chapter'
+YAML
+
+      assert system('rake interleave_txt'), 'rake should allow lowercase Act lines'
+      out = File.read('Lowercase_Act_draft_0.txt')
+      assert_match(/^\* act 1$/m, out)
     end
   end
 

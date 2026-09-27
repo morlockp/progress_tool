@@ -120,7 +120,16 @@ class DefaultTaskTest < Minitest::Test
 
       config = YAML.load_file('.rakefile.yaml')
       assert_equal [], config[:frontmatter]
-      assert_equal [], config[:aftermatter]
+      assert_equal [], config[:never_hyphenate]
+      assert_equal 'full', config[:frontmatter_layout]
+      assert_nil config[:aftermatter_about_the_author]
+      assert_nil config[:aftermatter_stay_connected]
+      assert_equal [], config[:aftermatter_other]
+      assert_nil config[:epigraph]
+      assert_nil config[:timeline]
+      assert_nil config[:dramatis_personae]
+      assert_nil config[:kickstarter_backers]
+      assert_equal true, config[:toc]
       assert_equal '.default.docx', config[:docx_reference]
       assert_equal '.docx_styles.yaml', config[:docx_styles]
       assert_equal 'author goes here', config[:author]
@@ -136,6 +145,29 @@ class DefaultTaskTest < Minitest::Test
       assert_equal 40, docx_styles['styles']['heading_1']['size']
       assert_equal 36, docx_styles['styles']['title_page_title']['size']
       assert_equal 20, docx_styles['styles']['title_page_author']['size']
+      assert_equal 12, docx_styles['styles']['heading_3']['size']
+      assert_equal 16, docx_styles['styles']['title_page_series_title']['size']
+      assert_equal 14, docx_styles['styles']['title_page_conjunction']['size']
+      assert_equal 22, docx_styles['styles']['title_page_book_title']['size']
+      assert_equal 12, docx_styles['styles']['title_page_split_author']['size']
+      assert_equal 11, docx_styles['styles']['title_page_publisher']['size']
+      assert_equal 20, docx_styles['styles']['half_title_series_title']['size']
+      assert_equal 14, docx_styles['styles']['half_title_conjunction']['size']
+      assert_equal 28, docx_styles['styles']['half_title_book_title']['size']
+      %w[
+        title_page_title
+        title_page_author
+        title_page_series_title
+        title_page_conjunction
+        title_page_book_title
+        title_page_split_author
+        title_page_publisher
+        half_title_series_title
+        half_title_conjunction
+        half_title_book_title
+      ].each do |style_name|
+        assert_equal 0, docx_styles['styles'][style_name]['first_line_indent_inches'], "#{style_name} should not inherit paragraph indents"
+      end
       assert_equal 'single', docx_styles['styles']['normal']['line_spacing']
       assert_equal 0.2, docx_styles['styles']['normal']['first_line_indent_inches']
       assert_equal true, docx_styles['page_numbers']['enabled']
@@ -152,12 +184,15 @@ class DefaultTaskTest < Minitest::Test
       assert_match(/w:color w:val="000000"/, styles_xml)
       assert_match(/w:style w:type="paragraph" w:default="1" w:styleId="Normal".*?<w:jc w:val="left"\/>.*?<w:ind w:firstLine="288"\/>.*?w:line="240".*?w:sz w:val="22"/m, styles_xml)
       assert_match(/w:style w:type="paragraph" w:styleId="BodyText".*?<w:ind w:firstLine="288"\/>.*?w:sz w:val="22"/m, styles_xml)
-      assert_match(/w:style w:type="paragraph" w:styleId="FirstParagraph".*?<w:ind w:firstLine="0"\/>.*?w:sz w:val="22"/m, styles_xml)
-      assert_match(/w:style w:type="paragraph" w:styleId="Compact".*?<w:ind w:firstLine="0"\/>.*?w:after="0"/m, styles_xml)
+      assert_match(/w:style w:type="paragraph" w:styleId="FirstParagraph".*?w:firstLine="0".*?w:sz w:val="22"/m, styles_xml)
+      assert_match(/w:style w:type="paragraph" w:styleId="Compact".*?w:firstLine="0".*?w:after="0"/m, styles_xml)
       assert_match(/w:style w:type="paragraph" w:styleId="Heading1".*?<w:b\/>.*?w:sz w:val="80"/m, styles_xml)
       assert_match(/w:style w:type="paragraph" w:styleId="Heading2".*?<w:b\/>.*?w:sz w:val="30"/m, styles_xml)
+      assert_match(/w:style w:type="paragraph" w:styleId="Heading3".*?<w:outlineLvl w:val="2"\/>.*?<w:b\/>.*?w:sz w:val="24"/m, styles_xml)
       assert_match(/w:style w:type="paragraph" w:styleId="FrontmatterHeading1".*?<w:b\/>.*?w:sz w:val="24"/m, styles_xml)
       assert_match(/w:style w:type="paragraph" w:styleId="FrontmatterHeading2".*?<w:b\/>.*?w:sz w:val="24"/m, styles_xml)
+      assert_match(/w:style w:type="paragraph" w:styleId="FrontmatterHeading1".*?w:after="200"/m, styles_xml)
+      assert_match(/w:style w:type="paragraph" w:styleId="FrontmatterHeading2".*?w:after="200"/m, styles_xml)
       assert_match(/w:style w:type="paragraph" w:styleId="TitlePageTitle".*?w:spacing w:before="2880".*?<w:b\/>.*?w:sz w:val="72"/m, styles_xml)
       assert_match(/w:style w:type="paragraph" w:styleId="TitlePageAuthor".*?w:spacing w:before="1440".*?<w:b\/>.*?w:sz w:val="40"/m, styles_xml)
       assert_match(/w:style w:type="paragraph" w:styleId="TitlePageTitle".*?<w:suppressAutoHyphens\s*\/>/m, styles_xml)
@@ -273,6 +308,33 @@ class DefaultTaskTest < Minitest::Test
 
       out = `rake word_graph`
       assert_match(/2026-03-02: 9 words/, out)
+    end
+  end
+
+  def test_git_uses_revision_progress_as_commit_message_across_target_files
+    Dir.chdir(@tmp) do
+      system('git', 'init', out: File::NULL, err: File::NULL) or raise 'git init failed'
+      system('git', 'config', 'user.email', 'test@example.com') or raise 'git config failed'
+      system('git', 'config', 'user.name', 'Test User') or raise 'git config failed'
+
+      File.write('part_one.txt', "one two\n")
+      File.write('part_two.txt', "three four <----\n")
+      File.write('audit.txt', "This must not override revision mode.\n")
+      File.write('.rakefile.yaml', <<~YAML)
+        :target_files:
+          - part_one.txt
+          - part_two.txt
+        :title: Test Novel
+        :target_words: 100
+        :date_start: '2026-03-02'
+        :chapter_head_tag: '** chapter'
+      YAML
+
+      out = `rake git 2>&1`
+
+      assert $?.success?, out
+      assert_match(/Committing with message: 80\.00% revised/, out)
+      assert_equal '80.00% revised', `git log -1 --pretty=%s`.strip
     end
   end
 
