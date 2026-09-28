@@ -640,7 +640,7 @@ end
 
 def default_docx_styles
   {
-    "font" => "Garamond",
+    "font" => "EB Garamond",
     "color" => "000000",
     "page" => {
       "width_inches" => 6,
@@ -663,23 +663,23 @@ def default_docx_styles
     },
     "styles" => {
       "normal" => {
-        "size" => 11,
+        "size" => 12,
         "bold" => false,
         "align" => "left",
         "first_line_indent_inches" => 0.2,
-        "spacing_after_points" => 3.6,
+        "spacing_after_points" => 0,
         "line_spacing" => "single"
       },
       "first_paragraph" => {
-        "size" => 11,
+        "size" => 12,
         "bold" => false,
         "align" => "left",
         "first_line_indent_inches" => 0,
-        "spacing_after_points" => 3.6,
+        "spacing_after_points" => 0,
         "line_spacing" => "single"
       },
       "compact" => {
-        "size" => 11,
+        "size" => 12,
         "bold" => false,
         "align" => "left",
         "first_line_indent_inches" => 0,
@@ -766,22 +766,32 @@ def default_docx_styles
         "line_spacing" => "single"
       },
       "frontmatter_dramatis_heading" => {
-        "size" => 12,
+        "size" => 15,
         "bold" => true,
-        "align" => "left",
+        "align" => "center",
+        "first_line_indent_inches" => 0,
         "spacing_before_points" => 0,
         "spacing_after_points" => 10,
+        "line_spacing" => "single"
+      },
+      "frontmatter_dramatis_subheading" => {
+        "size" => 11,
+        "bold" => true,
+        "align" => "left",
+        "first_line_indent_inches" => 0,
+        "spacing_before_points" => 12,
+        "spacing_after_points" => 6,
         "line_spacing" => "single"
       },
       "frontmatter_dramatis" => {
         "size" => 11,
         "bold" => false,
         "align" => "left",
-        "left_indent_inches" => 1.1,
-        "first_line_indent_inches" => -1.1,
-        "tab_stop_inches" => 1.1,
-        "spacing_after_points" => 8,
-        "line_spacing" => "single",
+        "left_indent_inches" => 0.15,
+        "first_line_indent_inches" => -0.15,
+        "spacing_after_points" => 3,
+        "line_spacing" => "exact",
+        "line_spacing_points" => 13,
         "suppress_auto_hyphenation" => true
       },
       "dedication" => {
@@ -1028,18 +1038,22 @@ def docx_inches_to_twips(inches)
 end
 
 def docx_line_spacing_twips(style)
-  case style["line_spacing"].to_s
-  when "double"
-    480
-  when "single"
-    240
-  when "1.5"
-    360
-  else
-    return docx_points_to_twips(style["line_spacing_points"]) if style.key?("line_spacing_points")
+  if style.key?("line_spacing_points")
+    points = Float(style["line_spacing_points"])
+    raise "line_spacing_points must be positive and finite" unless points.positive? && points.finite?
 
-    480
+    return docx_points_to_twips(points)
   end
+
+  value = style["line_spacing"]
+  multiple = { "single" => 1.0, "double" => 2.0 }.fetch(value.to_s) { value.nil? ? 2.0 : Float(value) }
+  raise "line_spacing must be positive and finite" unless multiple.positive? && multiple.finite?
+
+  (multiple * 240).round
+end
+
+def docx_line_spacing_rule(style)
+  style.key?("line_spacing_points") ? "exact" : "auto"
 end
 
 def docx_spacing_twips(style, key)
@@ -1120,7 +1134,7 @@ def docx_paragraph_style_xml(style_id, name, style, styles, based_on: "Normal", 
         #{docx_first_line_indent_xml(style)}
         #{docx_tab_stop_xml(style)}
         #{docx_suppress_auto_hyphenation_xml(style)}
-        <w:spacing w:before="#{before}" w:after="#{after}" w:line="#{line}" w:lineRule="auto"/>
+        <w:spacing w:before="#{before}" w:after="#{after}" w:line="#{line}" w:lineRule="#{docx_line_spacing_rule(style)}"/>
         #{outline_xml}
       </w:pPr>
         <w:rPr>
@@ -1262,6 +1276,7 @@ def default_reference_styles_xml(styles = default_docx_styles)
   frontmatter_heading_2 = docx_style(styles, "frontmatter_heading_2")
   frontmatter_timeline = docx_style(styles, "frontmatter_timeline")
   frontmatter_dramatis_heading = docx_style(styles, "frontmatter_dramatis_heading")
+  frontmatter_dramatis_subheading = docx_style(styles, "frontmatter_dramatis_subheading")
   frontmatter_dramatis = docx_style(styles, "frontmatter_dramatis")
   dedication = docx_style(styles, "dedication")
   other_books_heading_1 = docx_style(styles, "other_books_heading_1")
@@ -1329,9 +1344,10 @@ def default_reference_styles_xml(styles = default_docx_styles)
         <w:name w:val="Normal"/>
         <w:qFormat/>
         <w:pPr>
+          <w:widowControl/>
           #{docx_align_xml(normal)}
           #{docx_first_line_indent_xml(normal)}
-          <w:spacing w:after="#{normal_after}" w:line="#{normal_line}" w:lineRule="auto"/>
+          <w:spacing w:after="#{normal_after}" w:line="#{normal_line}" w:lineRule="#{docx_line_spacing_rule(normal)}"/>
         </w:pPr>
         <w:rPr>
           <w:rFonts w:ascii="#{font}" w:hAnsi="#{font}" w:eastAsia="#{font}" w:cs="#{font}"/>
@@ -1349,7 +1365,7 @@ def default_reference_styles_xml(styles = default_docx_styles)
         <w:pPr>
           <w:keepNext/>
           #{docx_align_xml(heading_1)}
-          <w:spacing w:before="#{heading_1_before}" w:after="#{heading_1_after}"/>
+          <w:spacing w:before="#{heading_1_before}" w:after="#{heading_1_after}" w:line="#{docx_line_spacing_twips({"line_spacing" => "single"}.merge(heading_1))}" w:lineRule="#{docx_line_spacing_rule(heading_1)}"/>
           <w:outlineLvl w:val="0"/>
         </w:pPr>
         <w:rPr>
@@ -1368,7 +1384,7 @@ def default_reference_styles_xml(styles = default_docx_styles)
         <w:pPr>
           <w:keepNext/>
           #{docx_align_xml(heading_2)}
-          <w:spacing w:before="#{heading_2_before}" w:after="#{heading_2_after}"/>
+          <w:spacing w:before="#{heading_2_before}" w:after="#{heading_2_after}" w:line="#{docx_line_spacing_twips({"line_spacing" => "single"}.merge(heading_2))}" w:lineRule="#{docx_line_spacing_rule(heading_2)}"/>
           <w:outlineLvl w:val="1"/>
         </w:pPr>
         <w:rPr>
@@ -1387,7 +1403,7 @@ def default_reference_styles_xml(styles = default_docx_styles)
         <w:pPr>
           <w:keepNext/>
           #{docx_align_xml(heading_3)}
-          <w:spacing w:before="#{heading_3_before}" w:after="#{heading_3_after}"/>
+          <w:spacing w:before="#{heading_3_before}" w:after="#{heading_3_after}" w:line="#{docx_line_spacing_twips({"line_spacing" => "single"}.merge(heading_3))}" w:lineRule="#{docx_line_spacing_rule(heading_3)}"/>
           <w:outlineLvl w:val="2"/>
         </w:pPr>
         <w:rPr>
@@ -1403,6 +1419,7 @@ def default_reference_styles_xml(styles = default_docx_styles)
       #{docx_paragraph_style_xml("Compact", "Compact", compact, styles, next_style: "Compact")}
       #{docx_paragraph_style_xml("Dinkus", "Dinkus", dinkus, styles, next_style: "BodyText")}
       #{docx_paragraph_style_xml("MatterQRCode", "Matter QR Code", matter_qr_code, styles, next_style: "Normal")}
+      #{docx_paragraph_style_xml("CaptionedFigure", "Captioned Figure", normal.merge("line_spacing" => "single", "first_line_indent_inches" => 0).reject { |key, _| key == "line_spacing_points" }, styles)}
       <w:style w:type="paragraph" w:styleId="FrontmatterHeading1">
         <w:name w:val="Frontmatter Heading 1"/>
         <w:basedOn w:val="Normal"/>
@@ -1411,7 +1428,7 @@ def default_reference_styles_xml(styles = default_docx_styles)
         <w:pPr>
           <w:keepNext/>
           #{docx_align_xml(frontmatter_heading_1)}
-          <w:spacing w:before="#{frontmatter_heading_1_before}" w:after="#{frontmatter_heading_1_after}"/>
+          <w:spacing w:before="#{frontmatter_heading_1_before}" w:after="#{frontmatter_heading_1_after}" w:line="#{docx_line_spacing_twips({"line_spacing" => "single"}.merge(frontmatter_heading_1))}" w:lineRule="#{docx_line_spacing_rule(frontmatter_heading_1)}"/>
         </w:pPr>
         <w:rPr>
           <w:rFonts w:ascii="#{font}" w:hAnsi="#{font}" w:eastAsia="#{font}" w:cs="#{font}"/>
@@ -1429,7 +1446,7 @@ def default_reference_styles_xml(styles = default_docx_styles)
         <w:pPr>
           <w:keepNext/>
           #{docx_align_xml(frontmatter_heading_2)}
-          <w:spacing w:before="#{frontmatter_heading_2_before}" w:after="#{frontmatter_heading_2_after}"/>
+          <w:spacing w:before="#{frontmatter_heading_2_before}" w:after="#{frontmatter_heading_2_after}" w:line="#{docx_line_spacing_twips({"line_spacing" => "single"}.merge(frontmatter_heading_2))}" w:lineRule="#{docx_line_spacing_rule(frontmatter_heading_2)}"/>
         </w:pPr>
         <w:rPr>
           <w:rFonts w:ascii="#{font}" w:hAnsi="#{font}" w:eastAsia="#{font}" w:cs="#{font}"/>
@@ -1448,7 +1465,7 @@ def default_reference_styles_xml(styles = default_docx_styles)
           #{docx_align_xml(frontmatter_timeline)}
           #{docx_first_line_indent_xml(frontmatter_timeline)}
           #{docx_tab_stop_xml(frontmatter_timeline)}
-          <w:spacing w:after="#{frontmatter_timeline_after}" w:line="#{frontmatter_timeline_line}" w:lineRule="auto"/>
+          <w:spacing w:after="#{frontmatter_timeline_after}" w:line="#{frontmatter_timeline_line}" w:lineRule="#{docx_line_spacing_rule(frontmatter_timeline)}"/>
         </w:pPr>
         <w:rPr>
           <w:rFonts w:ascii="#{font}" w:hAnsi="#{font}" w:eastAsia="#{font}" w:cs="#{font}"/>
@@ -1458,7 +1475,8 @@ def default_reference_styles_xml(styles = default_docx_styles)
           <w:szCs w:val="#{frontmatter_timeline_size}"/>
         </w:rPr>
       </w:style>
-      #{docx_paragraph_style_xml("FrontmatterDramatisHeading", "Frontmatter Dramatis Heading", frontmatter_dramatis_heading, styles, next_style: "FrontmatterDramatis", keep_next: true)}
+      #{docx_paragraph_style_xml("FrontmatterDramatisHeading", "Frontmatter Dramatis Heading", frontmatter_dramatis_heading, styles, next_style: "FrontmatterDramatis", outline_level: 0, keep_next: true)}
+      #{docx_paragraph_style_xml("FrontmatterDramatisSubheading", "Frontmatter Dramatis Subheading", frontmatter_dramatis_subheading, styles, next_style: "FrontmatterDramatis", outline_level: 9, keep_next: true)}
       #{docx_paragraph_style_xml("FrontmatterDramatis", "Frontmatter Dramatis", frontmatter_dramatis, styles, next_style: "FrontmatterDramatis")}
       #{docx_paragraph_style_xml("Dedication", "Dedication", dedication, styles, next_style: "Normal")}
       #{docx_paragraph_style_xml("OtherBooksHeading1", "Other Books Heading 1", other_books_heading_1, styles, next_style: "OtherBooksHeading2", keep_next: true)}
@@ -1488,7 +1506,7 @@ def default_reference_styles_xml(styles = default_docx_styles)
         <w:pPr>
           <w:jc w:val="#{title_align}"/>
           #{docx_suppress_auto_hyphenation_xml(title)}
-          <w:spacing w:before="#{title_before}" w:after="#{title_after}"/>
+          <w:spacing w:before="#{title_before}" w:after="#{title_after}" w:line="#{docx_line_spacing_twips({"line_spacing" => "single"}.merge(title))}" w:lineRule="#{docx_line_spacing_rule(title)}"/>
         </w:pPr>
         <w:rPr>
           <w:rFonts w:ascii="#{font}" w:hAnsi="#{font}" w:eastAsia="#{font}" w:cs="#{font}"/>
@@ -1506,7 +1524,7 @@ def default_reference_styles_xml(styles = default_docx_styles)
         <w:pPr>
           <w:jc w:val="#{author_align}"/>
           #{docx_suppress_auto_hyphenation_xml(author)}
-          <w:spacing w:before="#{author_before}" w:after="#{author_after}"/>
+          <w:spacing w:before="#{author_before}" w:after="#{author_after}" w:line="#{docx_line_spacing_twips({"line_spacing" => "single"}.merge(author))}" w:lineRule="#{docx_line_spacing_rule(author)}"/>
         </w:pPr>
         <w:rPr>
           <w:rFonts w:ascii="#{font}" w:hAnsi="#{font}" w:eastAsia="#{font}" w:cs="#{font}"/>
@@ -1575,6 +1593,9 @@ task :init do
 :scene_markers: dinkus # dinkus (default) or heading
 :never_hyphenate: [] # exact words that must not hyphenate in DOCX
 :edition_format: print # print (default) or ebook; controls bibliography links
+:print_binding: paperback # or hardcover; hardcover checks limits and tries fitting presets
+:print_margins: auto # 6x9 paperbacks; false or {inside: 0.95, outside: 0.65}
+:generated_files: # default: [pdf] for print, [docx] for ebook; or [docx, pdf]
 :frontmatter_layout: full # full (default) or condensed
 :matter_qr_codes: [] # matter files whose standalone URLs should receive QR codes
 :dedication:
@@ -2550,7 +2571,7 @@ def parse_chapters_and_acts_from_contents(contents, file_path, config, line_sour
   # First pass: extract Act lines and track which chapter comes after
   lines.each_with_index do |line, idx|
     lineno = idx + 1
-    if line =~ /^\* / && line !~ /^\*\s+\*\s+\*\s*$/
+    if line =~ /^\* / && line !~ /^\*\s+\*\s+\*\s*$/ && line !~ /^#{Regexp.escape(chapter_head_tag)}\s/
       # Line starts with single asterisk
       if line !~ /^\* Act /i
         bytes = line.bytes.map { |b| sprintf("%02x", b) }.join(' ')
@@ -3142,6 +3163,9 @@ def process_bold_for_html(text)
 end
 
 def apply_never_hyphenate_words(text, config)
+  # Kindle conversion can give word joiners visible width. Keep ebook words intact.
+  return text if edition_format(config || {}) == "ebook"
+
   words = Array(config && (config[:never_hyphenate] || config["never_hyphenate"])).map(&:to_s).reject(&:empty?).uniq
   words.sort_by { |word| -word.length }.each do |word|
     text = text.gsub(/(?<![\p{L}\p{N}_])#{Regexp.escape(word)}(?![\p{L}\p{N}_])/u) { |match| match.chars.join("\u2060") }
@@ -3386,7 +3410,10 @@ def reader_actions_html(config, page_breaks = false)
       html << "<h2>#{heading}</h2>"
     end
     html << "<p>#{CGI.escapeHTML(section[:intro].to_s)}</p>" unless section[:intro].to_s.strip.empty?
-    html.concat(section[:items].map { |item| reader_action_item_html(item, format) })
+    html.concat(section[:items].map do |item|
+      entry = reader_action_item_html(item, format)
+      format == "print" ? %(<div custom-style="ReaderActionItem">#{entry}</div>) : entry
+    end)
   end
   html << "<p>DOCX_ABOUT_AUTHOR_END</p>" if page_breaks
   html.join("\n") + "\n"
@@ -3636,7 +3663,13 @@ end
 def about_author_html(config)
   html_parts = about_author_files(config).map do |entry|
     file = frontmatter_entry_file(entry)
-    matter_file_to_html(file, config)
+    html = matter_file_to_html(file, config)
+    if edition_format(config) == "ebook" && !markdown_file?(file)
+      html = html.gsub(%r{(?<![\w/:.])x\.com/[A-Za-z0-9_]+\b}) do |profile|
+        %(<a href="https://#{profile}">#{profile}</a>)
+      end
+    end
+    html
   end.map(&:strip).reject(&:empty?)
 
   return "" if html_parts.empty?
@@ -3664,7 +3697,9 @@ def aftermatter_html_with_page_break_markers(config)
   aftermatter_file_entries(config).each_with_index do |entry, idx|
     file = frontmatter_entry_file(entry)
     html_parts << %(<p>DOCX_AFTERMATTER_PAGE_BREAK_#{idx}</p>)
+    html_parts << '<p>DOCX_SUPPLEMENT_START</p>'
     html_parts << matter_file_to_html(file, config).strip
+    html_parts << '<p>DOCX_SUPPLEMENT_END</p>'
   end
 
   return "" if html_parts.empty?
@@ -3713,18 +3748,23 @@ def frontmatter_html_with_page_break_markers(config)
     html = matter_file_to_html(file, config)
     timeline = frontmatter_timeline_entry?(entry)
     dramatis = frontmatter_dramatis_entry?(entry)
+    heading = html[/<h[1-6]\b[^>]*>(.*?)<\/h[1-6]>/m, 1].to_s
+    dramatis_headings = dramatis || CGI.unescapeHTML(heading.gsub(/<[^>]+>/, "")).strip.match?(/\ADramatis Person(?:ae|æ)\z/i)
     html_parts << "<p>DOCX_FRONTMATTER_TIMELINE_START</p>" if timeline
-    html_parts << "<p>DOCX_FRONTMATTER_DRAMATIS_START</p>" if dramatis
+    if dramatis_headings
+      marker = dramatis ? "DOCX_FRONTMATTER_DRAMATIS_START" : "DOCX_FRONTMATTER_DRAMATIS_HEADINGS_START"
+      html_parts << "<p>#{marker}</p>"
+    end
     html_parts << html.strip
     html_parts << %(<p>DOCX_FRONTMATTER_PAGE_BREAK_#{idx}_VERSO</p>)
     if full_layout && timeline
       html_parts << %(<p>DOCX_FRONTMATTER_PAGE_BREAK_#{idx}_RECTO</p>)
       html_parts << "<p>DOCX_FRONTMATTER_TIMELINE_END</p>"
-    elsif full_layout && dramatis
+    elsif full_layout && dramatis_headings
       html_parts << "<p>DOCX_FRONTMATTER_DRAMATIS_END</p>"
     else
       html_parts << "<p>DOCX_FRONTMATTER_TIMELINE_END</p>" if timeline
-      html_parts << "<p>DOCX_FRONTMATTER_DRAMATIS_END</p>" if dramatis
+      html_parts << "<p>DOCX_FRONTMATTER_DRAMATIS_END</p>" if dramatis_headings
       html_parts << %(<p>DOCX_FRONTMATTER_PAGE_BREAK_#{idx}_RECTO</p>) if full_layout
     end
   end.flatten.reject(&:empty?)
@@ -3805,6 +3845,8 @@ def half_title_verso_html(config)
 
   file = frontmatter_entry_file(entry)
   html = matter_file_to_html(file, config)
+  # Bibliography sections can share names with story/chapter headings.
+  html = html.gsub(/(\s(?:id="|href="#))([^"]+)"/, '\\1other-books-\\2"')
   format = edition_format(config)
   # Style only bibliography links; keep title emphasis and other matter links.
   html = html.gsub(%r{<a\b([^>]*)>(.*?)</a>}mi) do
@@ -3996,10 +4038,10 @@ def copyright_page_revision_history_html(config)
     rescue ArgumentError
       abort "*** ERROR: revision_history date must be a valid YYYY-MM or YYYY-MM-DD"
     end
-    label = date.strftime(date_text.length == 7 ? "%B %Y" : "%B %-d, %Y")
-    [date, "#{CGI.escapeHTML(label)}: #{CGI.escapeHTML(description)}"]
-  end.sort_by(&:first).map(&:last).join("<br />\n")
-  %(<div custom-style="CopyrightRevisionHeading"><p>Revision history:</p></div>\n<div custom-style="CopyrightRevisionHistory" style="margin-left: 0.25in;"><p>#{lines}</p></div>)
+    label = date.strftime(date_text.length == 7 ? "%b %Y" : "%b %-d, %Y")
+    [date, %(<p style="margin: 0; padding-left: 1in; text-indent: -1in;"><span style="display: inline-block; width: 1in; text-indent: 0;">#{CGI.escapeHTML(label)}:</span>#{CGI.escapeHTML(description)}</p>)]
+  end.sort_by(&:first).map(&:last).join("\n")
+  %(<div custom-style="CopyrightRevisionHeading"><p>Revision history:</p></div>\n<div custom-style="CopyrightRevisionHistory" style="margin-left: 0.25in;">#{lines}</div>)
 end
 
 def copyright_page_html(config)
@@ -4431,14 +4473,25 @@ def draft_output_basename(config)
   title_part = title.to_s.strip.gsub(/\s+/, "_").gsub(/[\/\\]/, "_").delete(":")
   title_part = "output" if title_part == ""
 
-  "#{title_part}_draft_#{draft}"
+  edition = edition_format(config) == "ebook" ? "ebook" : (print_binding(config) == "hardcover" ? "hc" : "tpb")
+  "#{title_part}_#{edition}_draft_#{draft}"
 end
 
 def draft_output_file(config, extension)
   "#{draft_output_basename(config)}.#{extension.to_s.sub(/\A\./, "")}"
 end
 
-desc "Interleave chapters from all source files and write to <title>_draft_<N>.txt"
+def generated_file_formats(config)
+  value = config.fetch(:generated_files) { config["generated_files"] }
+  value = edition_format(config) == "ebook" ? ["docx"] : ["pdf"] if value.nil?
+  formats = Array(value).map { |format| format.to_s.sub(/\A\./, "") }.uniq
+  unless !formats.empty? && (formats - %w[docx pdf]).empty?
+    abort "*** ERROR: :generated_files must contain docx and/or pdf"
+  end
+  formats
+end
+
+desc "Interleave chapters from all source files and write to <title>_<edition>_draft_<N>.txt"
 task :interleave_txt do
   result = build_interleaved_chapters_for_targets(config)
   all_data = result[:all_data]
@@ -4574,39 +4627,14 @@ def default_docx_reference?(reference_file)
   File.basename(reference_file.to_s) == ".default.docx"
 end
 
-def docx_reference_has_style?(reference_file, style_id, style_type = "paragraph")
+def docx_reference_styles_match?(reference_file, styles)
   require 'zip'
 
   Zip::File.open(reference_file) do |zip|
-    entry = zip.find_entry("word/styles.xml")
-    return false unless entry
-
-    xml = entry.get_input_stream.read
-    xml.include?(%(<w:style w:type="#{style_type}" w:)) &&
-      xml.include?(%(w:styleId="#{style_id}"))
+    zip.read("word/styles.xml") == default_reference_styles_xml(styles)
   end
 rescue
   false
-end
-
-def docx_reference_style_has?(reference_file, style_id, pattern)
-  require 'zip'
-
-  Zip::File.open(reference_file) do |zip|
-    entry = zip.find_entry("word/styles.xml")
-    return false unless entry
-
-    styles_xml = entry.get_input_stream.read
-    styles_xml.match?(/<w:style\b(?=[^>]*w:styleId="#{Regexp.escape(style_id)}").*?#{pattern}.*?<\/w:style>/m)
-  end
-rescue
-  false
-end
-
-def docx_reference_has_character_styles?(reference_file, styles)
-  (styles["character_styles"] || {}).keys.all? do |style_id|
-    docx_reference_has_style?(reference_file, style_id, "character")
-  end
 end
 
 def refresh_default_docx_reference_if_needed(config)
@@ -4618,27 +4646,7 @@ def refresh_default_docx_reference_if_needed(config)
   create_default_docx_styles_yaml(styles_file)
   return if File.exist?(reference_file) &&
             File.mtime(reference_file) >= File.mtime(styles_file) &&
-            docx_reference_has_style?(reference_file, "BodyText") &&
-            docx_reference_has_style?(reference_file, "FirstParagraph") &&
-            docx_reference_has_style?(reference_file, "Compact") &&
-            docx_reference_has_style?(reference_file, "Dinkus") &&
-            docx_reference_has_style?(reference_file, "MatterQRCode") &&
-            docx_reference_has_style?(reference_file, "FrontmatterTimeline") &&
-            docx_reference_has_style?(reference_file, "FrontmatterDramatisHeading") &&
-            docx_reference_has_style?(reference_file, "FrontmatterDramatis") &&
-            docx_reference_has_style?(reference_file, "OtherBooksHeading1") &&
-            docx_reference_has_style?(reference_file, "OtherBooksHeading2") &&
-            docx_reference_has_style?(reference_file, "OtherBooksTitle") &&
-            docx_reference_has_style?(reference_file, "ChapterEpigraph") &&
-            docx_reference_has_style?(reference_file, "ChapterEpigraphAttribution") &&
-            docx_reference_has_style?(reference_file, "AboutAuthorHeading") &&
-            docx_reference_has_style?(reference_file, "ReaderActionHeading") &&
-            docx_reference_has_style?(reference_file, "AboutAuthorBody") &&
-            docx_reference_has_style?(reference_file, "CopyrightTitle") &&
-            docx_reference_has_style?(reference_file, "CopyrightBody") &&
-            docx_reference_has_style?(reference_file, "CopyrightPublisher") &&
-            docx_reference_style_has?(reference_file, "TitlePageTitle", %r{<w:suppressAutoHyphens\s*/>}) &&
-            docx_reference_has_character_styles?(reference_file, styles)
+            docx_reference_styles_match?(reference_file, styles)
 
   create_default_reference_docx(reference_file, true, styles_file)
 end
@@ -4921,25 +4929,50 @@ end
 def style_docx_dramatis_frontmatter_regions(xml, config)
   before_manuscript = true
   dramatis = false
+  first_heading = true
 
   xml.gsub(/<w:p\b.*?<\/w:p>/m) do |paragraph|
     if paragraph.include?("DOCX_MANUSCRIPT_START")
       before_manuscript = false
       paragraph
-    elsif before_manuscript && paragraph.include?("DOCX_FRONTMATTER_DRAMATIS_START")
+    elsif before_manuscript && paragraph.match?(/DOCX_FRONTMATTER_DRAMATIS_(?:HEADINGS_)?START/)
       dramatis = true
+      first_heading = true
       ""
     elsif before_manuscript && paragraph.include?("DOCX_FRONTMATTER_DRAMATIS_END")
       dramatis = false
       full_frontmatter_layout?(config) ? docx_page_break_paragraph : ""
     elsif before_manuscript && dramatis
-      style = paragraph.include?("FrontmatterHeading1") || paragraph.include?("FrontmatterHeading2") ?
-        "FrontmatterDramatisHeading" : "FrontmatterDramatis"
+      if paragraph.match?(/<w:pStyle\s+w:val="(?:Frontmatter)?Heading[1-6]"/)
+        style = first_heading ? "FrontmatterDramatisHeading" : "FrontmatterDramatisSubheading"
+        first_heading = false
+      else
+        style = "FrontmatterDramatis"
+      end
       paragraph = clear_docx_paragraph_layout_overrides(set_docx_paragraph_style(paragraph, style))
       style == "FrontmatterDramatis" ?
-        paragraph.sub(/(<w:t\b[^>]*>)\s*(\xE2\x80\x94)\s*/n, '\\1\\2</w:t><w:tab/><w:t>'.b) : paragraph
+        paragraph.sub('</w:pPr>', '<w:keepLines/></w:pPr>') : paragraph
     else
       paragraph
+    end
+  end
+end
+
+# Exact body leading must not clip inline artwork (maps, logos, or QR codes).
+def allow_docx_inline_image_height(xml)
+  xml.gsub(/<w:p\b.*?<\/w:p>/m) do |paragraph|
+    next paragraph unless paragraph.include?("<wp:inline") || paragraph.include?("<w:pict")
+
+    paragraph = paragraph.sub('<w:p>', '<w:p><w:pPr/>') unless paragraph.include?('<w:pPr')
+    paragraph.sub(/<w:pPr(?:\s[^>]*)?(?:\/>|>.*?<\/w:pPr>)/m) do |properties|
+      spacing = '<w:spacing w:line="240" w:lineRule="auto"/>'
+      if properties.match?(/<w:spacing\b/)
+        properties.sub(/<w:spacing\b[^>]*\/>/) do |existing|
+          existing.gsub(/ w:(?:line|lineRule)="[^"]*"/, '').sub('/>', ' w:line="240" w:lineRule="auto"/>')
+        end
+      else
+        properties == '<w:pPr/>' ? "<w:pPr>#{spacing}</w:pPr>" : properties.sub('</w:pPr>', "#{spacing}</w:pPr>")
+      end
     end
   end
 end
@@ -4966,7 +4999,7 @@ def add_docx_ebook_toc(xml)
   entries = []
   manuscript = xml[/<w:bookmarkStart w:id="(\d+)" w:name="#{DOCX_MANUSCRIPT_BOOKMARK}"\/>.*?<w:bookmarkEnd w:id="\1"\/>/m].to_s
   has_parts = manuscript.match?(/<w:pStyle\s+w:val="Heading1"/)
-  heading_styles = %w[Heading1 Heading2 AboutAuthorHeading OtherBooksHeading1 FrontmatterHeading1 FrontmatterHeading2]
+  heading_styles = %w[Heading1 Heading2 AboutAuthorHeading OtherBooksHeading1 FrontmatterHeading1 FrontmatterHeading2 FrontmatterDramatisHeading]
   xml = xml.gsub(/<w:p\b.*?<\/w:p>/m) do |paragraph|
     style = paragraph[/<w:pStyle\s+w:val="([^"]+)"/, 1]
     next paragraph unless heading_styles.include?(style)
@@ -5223,6 +5256,27 @@ def libreoffice_refresh_script
   PY
 end
 
+# LibreOffice 7.3 exports a range bookmark as duplicate starts and orphaned ends.
+# Join our manuscript boundary back into its original single range after export.
+def normalize_docx_manuscript_bookmark(xml)
+  starts = xml.scan(/<w:bookmarkStart\b[^>]*\bw:name="#{DOCX_MANUSCRIPT_BOOKMARK}"[^>]*\/>/)
+  return xml if starts.size < 2
+
+  ids = starts.map { |tag| tag[/\bw:id="(\d+)"/, 1] }
+  ends = xml.scan(/<w:bookmarkEnd\b[^>]*\/>/).select { |tag| ids.include?(tag[/\bw:id="(\d+)"/, 1]) }
+  return xml if ends.empty?
+
+  xml.gsub(/<w:bookmark(?:Start|End)\b[^>]*\/>/) do |tag|
+    if !ids.include?(tag[/\bw:id="(\d+)"/, 1]) || tag == starts.first
+      tag
+    elsif tag == ends.last
+      %(<w:bookmarkEnd w:id="#{ids.first}"/>)
+    else
+      ""
+    end
+  end
+end
+
 def refresh_docx_fields_with_libreoffice(docx_file)
   libreoffice = executable_in_path("libreoffice", "soffice")
   python = File.executable?("/usr/bin/python3") ? "/usr/bin/python3" : executable_in_path("python3")
@@ -5235,6 +5289,7 @@ def refresh_docx_fields_with_libreoffice(docx_file)
   accept = "socket,host=127.0.0.1,port=#{port};urp;StarOffice.ServiceManager"
   env = {
     "HOME" => profile_dir,
+    "XDG_DATA_HOME" => ENV["XDG_DATA_HOME"] || File.join(Dir.home, ".local", "share"),
     "XDG_CONFIG_HOME" => File.join(profile_dir, "config"),
     "XDG_CACHE_HOME" => cache_dir,
     "XDG_RUNTIME_DIR" => File.join(profile_dir, "runtime")
@@ -5261,6 +5316,14 @@ def refresh_docx_fields_with_libreoffice(docx_file)
     )
 
     success = system(env, python, script.path, File.expand_path(docx_file), port, :out => File::NULL, :err => File::NULL)
+    if success
+      require 'zip'
+      Zip::File.open(docx_file) do |zip|
+        xml = zip.read('word/document.xml')
+        normalized = normalize_docx_manuscript_bookmark(xml)
+        zip.get_output_stream('word/document.xml') { |stream| stream.write(normalized) } if normalized != xml
+      end
+    end
     success
   rescue
     false
@@ -5287,6 +5350,7 @@ def convert_docx_to_pdf_with_libreoffice(docx_file, pdf_file)
   outdir = File.dirname(pdf_path)
   env = {
     "HOME" => profile_dir,
+    "XDG_DATA_HOME" => ENV["XDG_DATA_HOME"] || File.join(Dir.home, ".local", "share"),
     "XDG_CONFIG_HOME" => File.join(profile_dir, "config"),
     "XDG_CACHE_HOME" => cache_dir,
     "XDG_RUNTIME_DIR" => File.join(profile_dir, "runtime"),
@@ -5359,6 +5423,7 @@ def postprocess_docx_title_page(docx_file, config, interleaved = [])
     half_title_verso = false
     other_books_catalog_frame = false
     about_author = false
+    supplement = false
     reader_actions = false
     stay_connected = false
     copyright_page = false
@@ -5441,6 +5506,12 @@ def postprocess_docx_title_page(docx_file, config, interleaved = [])
           half_title_verso = false
           # Keep the next page break outside the anchored catalog block.
           other_books_catalog_frame ? '<w:p><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr></w:p>' : ""
+        elsif paragraph.include?("DOCX_SUPPLEMENT_START")
+          supplement = true
+          ""
+        elsif paragraph.include?("DOCX_SUPPLEMENT_END")
+          supplement = false
+          ""
         elsif paragraph.include?("DOCX_ABOUT_AUTHOR_START")
           about_author = true
           reader_actions = paragraph.include?("DOCX_ABOUT_AUTHOR_START_READER_ACTIONS")
@@ -5515,7 +5586,16 @@ def postprocess_docx_title_page(docx_file, config, interleaved = [])
             paragraph = paragraph.sub('</w:pPr>', "#{frame}</w:pPr>")
           end
           paragraph
+        elsif supplement && paragraph.match?(/<w:pStyle\s+w:val="Heading1"/)
+          paragraph = set_docx_paragraph_style(paragraph, "AboutAuthorHeading")
+          paragraph = reset_docx_paragraph_indent(paragraph)
+          set_docx_paragraph_spacing(paragraph, before_inches: 0.15, after_inches: 0.1)
+        elsif supplement && paragraph.match?(/<w:pStyle\s+w:val="Heading2"/)
+          paragraph = set_docx_paragraph_style(paragraph, "FrontmatterHeading2")
+          paragraph = reset_docx_paragraph_indent(paragraph)
+          set_docx_paragraph_spacing(paragraph, before_inches: 1.0 / 6, after_inches: 1.0 / 12)
         elsif about_author
+          reader_item = reader_actions && paragraph.include?('w:val="ReaderActionItem"')
           paragraph = if paragraph.match?(/<w:pStyle\s+w:val="Heading1"/)
             paragraph = set_docx_paragraph_spacing(paragraph, before_inches: 0.15, after_inches: 0.1) if reader_actions
             set_docx_paragraph_style(paragraph, "AboutAuthorHeading")
@@ -5526,6 +5606,10 @@ def postprocess_docx_title_page(docx_file, config, interleaved = [])
             set_docx_paragraph_style(paragraph, "AboutAuthorBody")
           end
           paragraph = reset_docx_paragraph_indent(paragraph)
+          if reader_item
+            paragraph = center_docx_paragraph(paragraph)
+            paragraph = paragraph.sub('</w:pPr>', '<w:keepLines/></w:pPr>')
+          end
           paragraph
         elsif stay_connected
           paragraph = if paragraph.match?(/<w:pStyle\s+w:val="Heading1"/)
@@ -5554,7 +5638,10 @@ def postprocess_docx_title_page(docx_file, config, interleaved = [])
             paragraph = set_docx_paragraph_spacing(paragraph, before_inches: 0, after_inches: 0)
             paragraph = paragraph.sub('</w:pPr>', '<w:keepNext/></w:pPr>')
           elsif revision_history
-            paragraph = paragraph.sub('<w:ind w:left="0"', '<w:ind w:left="360"')
+            paragraph = set_docx_paragraph_spacing(paragraph, before_inches: 0, after_inches: 0)
+            paragraph = paragraph.sub('<w:ind w:left="0" w:firstLine="0"/>',
+              '<w:tabs><w:tab w:val="left" w:pos="1800"/></w:tabs><w:ind w:left="1800" w:hanging="1440"/>')
+            paragraph = paragraph.sub(/(<w:t\b[^>]*>[A-Z][a-z]{2} (?:\d{1,2}, )?\d{4}:)\s*(<\/w:t>)/, '\\1\\2<w:tab/>')
           end
           paragraph
         elsif dedication
@@ -5602,6 +5689,7 @@ def postprocess_docx_title_page(docx_file, config, interleaved = [])
     xml = replace_docx_endnote_page_markers(xml)
     xml = replace_final_docx_section(xml, docx_body_section_xml(config))
     xml = remap_docx_section_relationship_ids(xml, zip)
+    xml = allow_docx_inline_image_height(xml)
     zip.get_output_stream("word/document.xml") { |f| f.write(xml) }
     enforce_docx_character_styles(zip, config)
     enforce_docx_document_settings(zip, config)
@@ -5615,7 +5703,7 @@ def postprocess_docx_title_page(docx_file, config, interleaved = [])
   end
 end
 
-desc "Interleave chapters from all source files and write to <title>_draft_<N>.html"
+desc "Interleave chapters from all source files and write to <title>_<edition>_draft_<N>.html"
 task :interleave_html do
   require 'cgi'
 
@@ -5636,8 +5724,7 @@ task :interleave_html do
   print_pragma_output_validation(interleaved, pragma_registry, all_data)
 end
 
-desc "Interleave chapters from all source files and write to <title>_draft_<N>.docx"
-task :interleave_doc do
+def generate_interleaved_docx(config)
   require 'cgi'
 
   result = build_interleaved_chapters_for_targets(config)
@@ -5660,22 +5747,182 @@ task :interleave_doc do
   refresh_default_docx_reference_if_needed(config)
   convert_html_to_docx_pandoc(html_file, docx_file, config, true)
   postprocess_docx_title_page(docx_file, config, interleaved)
+  FileUtils.rm_f(html_file)
   
   puts "Converted to #{docx_file}"
   print_interleave_summary(max_chapter)
   print_pragma_output_validation(interleaved, pragma_registry, all_data)
 end
 
-desc "Interleave chapters from all source files and write to <title>_draft_<N>.pdf"
-task :interleave_pdf => :interleave_doc do
+def paperback_inside_margin(page_count)
+  raise "Page count must be a positive integer" unless page_count.is_a?(Integer) && page_count.positive?
+
+  return 0.70 if page_count < 200
+  return 0.80 if page_count < 400
+  return 0.90 if page_count < 500
+
+  0.95
+end
+
+def print_binding(config)
+  binding = config[:print_binding] || config["print_binding"] || "paperback"
+  raise ":print_binding must be paperback or hardcover" unless %w[paperback hardcover].include?(binding)
+
+  binding
+end
+
+def hardcover_layout_config(config)
+  return nil unless edition_format(config) == "print" && print_binding(config) == "hardcover"
+
+  defaults = {
+    "min_pages" => 75, "max_pages" => 550,
+    "presets" => [
+      {"name" => "tighter_spacing", "body_size" => 12, "leading" => 14.5, "top_margin" => 0.70, "bottom_margin" => 0.80},
+      {"name" => "compact_spacing", "body_size" => 12, "leading" => 14, "top_margin" => 0.70, "bottom_margin" => 0.80},
+      {"name" => "smaller_type", "body_size" => 11.5, "leading" => 14, "top_margin" => 0.70, "bottom_margin" => 0.80},
+      {"name" => "minimum_type", "body_size" => 11, "leading" => 13.5, "top_margin" => 0.70, "bottom_margin" => 0.80}
+    ]
+  }
+  value = config.fetch(:hardcover_layout) { config.fetch("hardcover_layout", {}) }
+  raise ":hardcover_layout must be a mapping" unless value.is_a?(Hash)
+  layout = defaults.merge(stringify_yaml_keys(value))
+  unless (layout.keys - defaults.keys).empty? && %w[min_pages max_pages].all? { |k| layout[k].is_a?(Integer) && layout[k].positive? } && layout["max_pages"] >= layout["min_pages"]
+    raise "Invalid hardcover page limits or unknown hardcover_layout setting"
+  end
+  raise "Hardcover presets must be a list" unless layout["presets"].is_a?(Array)
+  page = load_docx_styles(docx_styles_file(config)).fetch("page")
+  layout["presets"].each do |preset|
+    unless preset.is_a?(Hash) && preset.keys.sort == %w[body_size bottom_margin leading name top_margin] && preset["name"].is_a?(String) && !preset["name"].strip.empty?
+      raise "Each hardcover preset needs name, body_size, leading, top_margin and bottom_margin"
+    end
+    values = preset.values_at("body_size", "leading", "top_margin", "bottom_margin")
+    unless values.all? { |v| v.is_a?(Numeric) && v.finite? && v.positive? } && preset["body_size"] >= 11 && (preset["body_size"] * 2) % 1 == 0 && preset["leading"] >= [13.5, preset["body_size"] + 1.5].max
+      raise "Hardcover presets require body size >= 11pt in half-point steps and leading >= 13.5pt and >= body size + 1.5pt"
+    end
+    unless preset["bottom_margin"] > 0.2 && preset["top_margin"] + preset["bottom_margin"] < page["height_inches"]
+      raise "Hardcover preset margins leave no usable page or footer space"
+    end
+  end
+  layout
+end
+
+def print_margin_policy(config)
+  return nil if edition_format(config) == "ebook"
+
+  policy = config.fetch(:print_margins) { config.fetch("print_margins", "auto") }
+  return nil if policy == false
+
+  if policy.is_a?(Hash)
+    margins = stringify_yaml_keys(policy)
+    unless margins.keys.sort == %w[inside outside] && margins.values.all? { |v| v.is_a?(Numeric) && v.finite? && v.positive? }
+      raise ":print_margins requires positive finite inside and outside values in inches"
+    end
+    page = load_docx_styles(docx_styles_file(config)).fetch("page")
+    raise "Print margins leave no text width" if margins.values.sum >= page.fetch("width_inches")
+    return margins
+  end
+  raise ":print_margins must be auto, false, or {inside: inches, outside: inches}" unless policy == "auto"
+
+  page = load_docx_styles(docx_styles_file(config)).fetch("page")
+  print_binding(config)
+  return nil unless page["width_inches"] == 6 && page["height_inches"] == 9
+
+  "auto"
+end
+
+def generated_pdf_page_count(pdf_file)
+  info = IO.popen(["pdfinfo", pdf_file], &:read)
+  count = info[/^Pages:\s+(\d+)/, 1].to_i
+  raise "Could not read PDF page count: #{pdf_file}" unless $?.success? && count.positive?
+
+  count
+end
+
+def generate_edition_document(config, pdf: false)
+  policy = print_margin_policy(config)
+  hardcover = hardcover_layout_config(config)
+  preset_index = -1 # Always try the unmodified paperback typography first.
   docx_file = draft_output_file(config, "docx")
   pdf_file = draft_output_file(config, "pdf")
+  base_styles = load_docx_styles(docx_styles_file(config))
+  margins = policy == "auto" ? {"inside" => paperback_inside_margin(1), "outside" => 0.65} : policy
+  Dir.mktmpdir("rakefile-print-layout") do |dir|
+    reference = docx_reference_file(config)
+    if reference && !reference.to_s.empty? && !File.exist?(reference) && !default_docx_reference?(reference)
+      warn "*** WARNING: DOCX reference file #{reference} not found; using a generated default reference"
+      config = config.merge(:docx_reference => File.join(dir, ".default.docx"))
+    end
+    staged_pdf = File.join(dir, File.basename(pdf_file))
+    loop do
+      styles = Marshal.load(Marshal.dump(base_styles))
+      preset = hardcover["presets"][preset_index] if hardcover && preset_index >= 0
+      if preset
+        %w[normal first_paragraph compact].each do |name|
+          styles["styles"][name].merge!("size" => preset["body_size"], "line_spacing" => "exact", "line_spacing_points" => preset["leading"])
+        end
+        styles["page"].merge!("margin_top_inches" => preset["top_margin"], "margin_bottom_inches" => preset["bottom_margin"], "footer_margin_inches" => preset["bottom_margin"] - 0.2)
+      end
+      build_config = config
+      if margins || preset
+        styles["page"].merge!("margin_left_inches" => margins["inside"], "margin_right_inches" => margins["outside"], "mirror_margins" => true) if margins
+        styles_file = File.join(dir, "styles.yaml")
+        File.write(styles_file, styles.to_yaml)
+        build_config = config.merge(:docx_styles => styles_file)
+      end
+      generate_interleaved_docx(build_config)
+      break unless pdf || policy == "auto" || hardcover
 
-  unless convert_docx_to_pdf_with_libreoffice(docx_file, pdf_file)
-    abort "*** ERROR: Could not convert #{docx_file} to #{pdf_file} with LibreOffice"
+      unless convert_docx_to_pdf_with_libreoffice(docx_file, staged_pdf)
+        abort "*** ERROR: Could not convert #{docx_file} to PDF with LibreOffice"
+      end
+      count = generated_pdf_page_count(staged_pdf) if policy == "auto" || hardcover
+      if policy == "auto"
+        required_inside = paperback_inside_margin(count)
+        if required_inside > margins["inside"]
+          margins["inside"] = required_inside
+          next
+        end
+        puts "Print layout: #{count} pages; inside #{margins['inside']}in, outside #{margins['outside']}in (mirrored)"
+      end
+      if hardcover
+        printed_pages = (count + 1) / 2 * 2
+        label = preset ? preset["name"] : "paperback"
+        puts "Hardcover candidate #{label}: #{count} PDF pages (#{printed_pages} printed)"
+        if printed_pages < hardcover["min_pages"]
+          raise "Hardcover is too short: #{printed_pages} printed pages; minimum #{hardcover['min_pages']}. No padding was added."
+        end
+        if printed_pages > hardcover["max_pages"]
+          preset_index += 1
+          if preset_index >= hardcover["presets"].length
+            raise "No approved hardcover layout fits #{hardcover['max_pages']} pages; last attempt #{printed_pages}. Prior PDF preserved."
+          end
+          next
+        end
+        body = styles["styles"]["normal"]
+        puts "Selected hardcover layout: #{label}; #{body['size']}pt body, #{body['line_spacing_points'] || body['line_spacing']} leading; #{printed_pages}/#{hardcover['max_pages']} pages"
+      end
+      FileUtils.mv(staged_pdf, pdf_file) if pdf
+      break
+    end
   end
+  puts "Converted to #{pdf_file}" if pdf
+end
 
-  puts "Converted to #{pdf_file}"
+desc "Interleave chapters from all source files and write to <title>_<edition>_draft_<N>.docx"
+task :interleave_doc do
+  generate_edition_document(config)
+end
+
+desc "Interleave chapters from all source files and write to <title>_<edition>_draft_<N>.pdf"
+task :interleave_pdf do
+  generate_edition_document(config, pdf: true)
+end
+
+desc "Generate the configured edition files (ebook: DOCX; print: PDF)"
+task :generate do
+  formats = generated_file_formats(config)
+  Rake::Task[formats.include?("pdf") ? :interleave_pdf : :interleave_doc].invoke
+  FileUtils.rm_f(draft_output_file(config, "docx")) unless formats.include?("docx")
 end
 
 # Alias: interleave_text does the same as interleave_txt

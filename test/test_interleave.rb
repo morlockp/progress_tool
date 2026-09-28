@@ -53,7 +53,7 @@ class InterleaveTest < Minitest::Test
       # run rake task
       system('rake interleave_txt') or raise 'rake failed'
 
-      assert File.exist?('Interleave_Test_draft_0.txt')
+      assert File.exist?('Interleave_Test_tpb_draft_0.txt')
       out = File.read(Dir['*_draft_0.txt'].first)
       expected = File.read(File.expand_path('expected_output.txt', __dir__))
 
@@ -128,17 +128,17 @@ class InterleaveTest < Minitest::Test
       File.write('.rakefile.yaml', config)
 
       assert system('rake interleave_txt interleave_html'), 'rake failed'
-      assert_includes File.read('Scene_Marker_Test_draft_0.txt'), "* * *"
-      refute_includes File.read('Scene_Marker_Test_draft_0.txt'), "*** scene 1: Arrival"
-      refute_includes File.read('Scene_Marker_Test_draft_0.txt'), "*** transition: The next day"
-      assert_includes File.read('Scene_Marker_Test_draft_0.html'), '<div custom-style="Dinkus"><p>* * *</p></div>'
+      assert_includes File.read('Scene_Marker_Test_tpb_draft_0.txt'), "* * *"
+      refute_includes File.read('Scene_Marker_Test_tpb_draft_0.txt'), "*** scene 1: Arrival"
+      refute_includes File.read('Scene_Marker_Test_tpb_draft_0.txt'), "*** transition: The next day"
+      assert_includes File.read('Scene_Marker_Test_tpb_draft_0.html'), '<div custom-style="Dinkus"><p>* * *</p></div>'
 
       File.write('.rakefile.yaml', "#{config}:scene_markers: heading\n")
       assert system('rake interleave_txt interleave_html'), 'rake failed'
-      assert_includes File.read('Scene_Marker_Test_draft_0.txt'), "*** scene 1: Arrival"
-      assert_includes File.read('Scene_Marker_Test_draft_0.txt'), "*** transition: The next day"
-      assert_includes File.read('Scene_Marker_Test_draft_0.html'), "<h3>scene 1: Arrival</h3>"
-      assert_includes File.read('Scene_Marker_Test_draft_0.html'), "<h3>transition: The next day</h3>"
+      assert_includes File.read('Scene_Marker_Test_tpb_draft_0.txt'), "*** scene 1: Arrival"
+      assert_includes File.read('Scene_Marker_Test_tpb_draft_0.txt'), "*** transition: The next day"
+      assert_includes File.read('Scene_Marker_Test_tpb_draft_0.html'), "<h3>scene 1: Arrival</h3>"
+      assert_includes File.read('Scene_Marker_Test_tpb_draft_0.html'), "<h3>transition: The next day</h3>"
     end
   end
 
@@ -663,6 +663,26 @@ YAML
     end
   end
 
+  def test_configured_single_asterisk_chapter_tag_is_allowed
+    Dir.chdir(@tmp) do
+      File.write('story.txt', "* Act 1: Start\n* chapter 1: First\nOpening.\n* chapter 2: Second\nEnding.\n")
+      File.write('.rakefile.yaml', <<~YAML)
+        :target_files: [story.txt]
+        :title: Legacy Chapters
+        :chapter_head_tag: '* chapter'
+        :target_words: 100
+        :date_start: '2026-09-27'
+      YAML
+      assert system('rake interleave_txt interleave_html'), 'configured chapter marker must take precedence over Act validation'
+      text = File.read('Legacy_Chapters_tpb_draft_0.txt')
+      assert_equal 1, text.scan('* Act 1: Start').size
+      assert text.index('* Act 1: Start') < text.index('* chapter 1: First')
+      assert_includes text, '* chapter 2: Second'
+      assert_includes text, 'Opening.'
+      assert_includes text, 'Ending.'
+    end
+  end
+
   def test_invalid_star_line_fails
     Dir.chdir(@tmp) do
       # overwrite config to point at invalid star fixture
@@ -697,9 +717,9 @@ YAML
 YAML
 
       assert system('rake interleave_txt interleave_html'), 'rake should allow manuscript scene breaks'
-      out = File.read('Scene_Break_draft_0.txt')
+      out = File.read('Scene_Break_tpb_draft_0.txt')
       assert_match(/^\* \* \*$/m, out)
-      assert_includes File.read('Scene_Break_draft_0.html'), '<div custom-style="Dinkus"><p>* * *</p></div>'
+      assert_includes File.read('Scene_Break_tpb_draft_0.html'), '<div custom-style="Dinkus"><p>* * *</p></div>'
     end
   end
 
@@ -720,7 +740,7 @@ YAML
 YAML
 
       assert system('rake interleave_txt'), 'rake should allow lowercase Act lines'
-      out = File.read('Lowercase_Act_draft_0.txt')
+      out = File.read('Lowercase_Act_tpb_draft_0.txt')
       assert_match(/^\* act 1$/m, out)
     end
   end

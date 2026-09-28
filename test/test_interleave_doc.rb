@@ -34,6 +34,37 @@ class InterleaveDocTest < Minitest::Test
     FileUtils.remove_entry(@tmp) if @tmp && Dir.exist?(@tmp)
   end
 
+  def test_generate_selects_formats_and_cleans_only_successful_intermediates
+    Dir.chdir(@tmp) do
+      File.write('story.txt', "Opening sentence.\n")
+      base = ":target_files: [story.txt]\n:title: Output Test\n:chapterless: true\n:toc: false\n:date_start: '2026-09-28'\n"
+      cases = [['ebook', nil, ['docx']], ['print', nil, ['pdf']],
+               ['print', '[docx, .pdf]', ['docx', 'pdf']], ['print', '.docx', ['docx']]]
+      cases.each do |edition, setting, expected|
+        FileUtils.rm_f(Dir['Output_Test_*'])
+        File.write('historical.html', 'Keep me')
+        yaml = base + ":edition_format: #{edition}\n"
+        yaml += ":generated_files: #{setting}\n" if setting
+        File.write('.rakefile.yaml', yaml)
+        assert system('rake generate'), "#{edition}/#{setting} failed"
+        stem = "Output_Test_#{edition == 'ebook' ? 'ebook' : 'tpb'}_draft_0"
+        %w[docx pdf html].each { |ext| assert_equal expected.include?(ext), File.exist?("#{stem}.#{ext}"), ext }
+        assert_equal 'Keep me', File.read('historical.html')
+      end
+      File.write('.rakefile.yaml', base + ":generated_files: [exe]\n")
+      output = IO.popen(['rake', 'generate'], err: [:child, :out], &:read)
+      refute $?.success?
+      assert_includes output, ':generated_files must contain docx and/or pdf'
+      File.write('.rakefile.yaml', base + ":generated_files: [pdf]\n")
+      File.open('rakefile', 'a') { |f| f.puts "\ndef convert_docx_to_pdf_with_libreoffice(*); false; end" }
+      refute system('rake generate'), 'failed conversion must fail the build'
+      assert File.exist?('Output_Test_tpb_draft_0.docx'), 'failed PDF conversion must keep DOCX'
+      File.open('rakefile', 'a') { |f| f.puts "\ndef convert_html_to_docx_pandoc(*); abort 'test conversion failure'; end" }
+      refute system('rake docx')
+      assert File.exist?('Output_Test_tpb_draft_0.html'), 'failed DOCX conversion must keep HTML'
+    end
+  end
+
   def test_chapterless_story_without_toc_or_print_page_numbers
     Dir.chdir(@tmp) do
       File.write('story.txt', "Opening paragraph.\n\n* * *\n\nClosing paragraph.\n")
@@ -51,7 +82,7 @@ class InterleaveDocTest < Minitest::Test
           enabled: false
       YAML
       system('rake interleave_doc') or raise 'rake failed'
-      html = File.read('Short_Story_draft_0.html')
+      html = docx_source_html
       assert_includes html, '<p>Opening paragraph.</p>'
       assert_includes html, '<p>Closing paragraph.</p>'
       assert_includes html, '<p>* * *</p>'
@@ -59,7 +90,7 @@ class InterleaveDocTest < Minitest::Test
       assert_operator html.index('id="story-title"'), :<, html.index('Opening paragraph.')
       refute_match(/<h2 id="chapter-/, html)
       refute_includes html, 'DOCX_TOC_INSERT'
-      xml = extract_docx_content('Short_Story_draft_0.docx')
+      xml = extract_docx_content('Short_Story_tpb_draft_0.docx')
       opening = xml.scan(/<w:p\b.*?<\/w:p>/m).find { |p| p.include?('w:name="story-title"') }
       assert_includes opening, '<w:jc w:val="center"/>'
       assert_includes opening, '<w:ind w:left="0" w:firstLine="0"/>'
@@ -71,7 +102,7 @@ class InterleaveDocTest < Minitest::Test
       config = File.read('.rakefile.yaml')
       File.write('.rakefile.yaml', config + ":opening_title: false\n")
       assert system('rake interleave_doc'), 'suppressed opening title failed'
-      xml = extract_docx_content('Short_Story_draft_0.docx')
+      xml = extract_docx_content('Short_Story_tpb_draft_0.docx')
       refute_includes xml, 'w:name="story-title"'
       assert_includes xml, 'Opening paragraph.'
 
@@ -79,7 +110,7 @@ class InterleaveDocTest < Minitest::Test
       File.write('ending.txt', "The final paragraph.\n\nAn interruption -\n")
       File.write('.rakefile.yaml', config.sub('[story.txt]', '[story.txt, ending.txt]') + ":opening_title: auto\n")
       assert system('rake interleave_html'), 'automatic opening title failed'
-      html = File.read('Short_Story_draft_0.html')
+      html = File.read('Short_Story_tpb_draft_0.html')
       assert_equal 1, html.scan('id="story-title"').size
       assert_includes html, 'The final paragraph.'
       assert_includes html, "An interruption\u00a0-"
@@ -88,10 +119,10 @@ class InterleaveDocTest < Minitest::Test
       File.write('story.txt', "** chapter 1: Arrival\n\nOpening paragraph.\n")
       File.write('.rakefile.yaml', chaptered)
       assert system('rake interleave_html'), 'chaptered opening failed'
-      refute_includes File.read('Short_Story_draft_0.html'), 'id="story-title"'
+      refute_includes File.read('Short_Story_tpb_draft_0.html'), 'id="story-title"'
       File.write('.rakefile.yaml', chaptered + ":opening_title: true\n")
       assert system('rake interleave_html'), 'forced opening title failed'
-      html = File.read('Short_Story_draft_0.html')
+      html = File.read('Short_Story_tpb_draft_0.html')
       assert_operator html.index('id="story-title"'), :<, html.index('id="chapter-1"')
       File.write('.rakefile.yaml', config + ":opening_title: typo\n")
       output = IO.popen(['rake', 'interleave_html'], err: [:child, :out], &:read)
@@ -122,7 +153,7 @@ class InterleaveDocTest < Minitest::Test
         :aftermatter_stay_connected: links.md
       YAML
       assert system('rake interleave_doc interleave_txt'), 'rake failed'
-      xml = extract_docx_content('Ebook_Layout_draft_0.docx')
+      xml = extract_docx_content('Ebook_Layout_tpb_draft_0.docx')
       assert_equal 2, xml.scan('Ebook Layout').size
       order = ['Ebook Layout', 'Copyright', 'Opening paragraph.', 'Closing paragraph.',
                'Stay Connected', 'Other Books', 'Book One', 'Author biography.']
@@ -130,17 +161,17 @@ class InterleaveDocTest < Minitest::Test
       assert_equal positions.sort, positions
       assert_equal 1, xml.scan('Other Books').size
       refute_includes xml, 'DOCX_'
-      assert_includes extract_docx_file('Ebook_Layout_draft_0.docx', 'word/_rels/document.xml.rels'), 'https://example.com/books'
-      text = File.read('Ebook_Layout_draft_0.txt')
+      assert_includes extract_docx_file('Ebook_Layout_tpb_draft_0.docx', 'word/_rels/document.xml.rels'), 'https://example.com/books'
+      text = File.read('Ebook_Layout_tpb_draft_0.txt')
       assert_match(/Closing paragraph.*Stay Connected.*Other Books.*Author biography/m, text)
 
       File.write('.rakefile.yaml', File.read('.rakefile.yaml').sub(':toc: false', ':toc: ebook'))
       assert system({'RAKEFILE_SKIP_DOCX_TOC_REFRESH' => nil}, 'rake interleave_doc'), 'ebook TOC build failed'
-      xml = extract_docx_content('Ebook_Layout_draft_0.docx')
+      xml = extract_docx_content('Ebook_Layout_tpb_draft_0.docx')
       toc = xml[/<w:sdt\b.*?<\/w:sdt>/m]
       refute_nil toc
       assert_includes toc, 'w:name="toc"'
-      assert_includes extract_docx_file('Ebook_Layout_draft_0.docx', 'word/settings.xml'), '<w:updateFields w:val="false"/>'
+      assert_includes extract_docx_file('Ebook_Layout_tpb_draft_0.docx', 'word/settings.xml'), '<w:updateFields w:val="false"/>'
       assert_includes toc, '\\n'
       refute_includes toc, 'PAGEREF'
       labels = toc.scan(/<w:hyperlink\b.*?<w:t>(.*?)<\/w:t>.*?<\/w:hyperlink>/m).flatten
@@ -159,7 +190,7 @@ class InterleaveDocTest < Minitest::Test
       config_text = config_text.sub(':target_files: [story.txt]', ':target_files: [fixtures/story_lopez.txt]')
       File.write('.rakefile.yaml', config_text + ":frontmatter: [TOC, preface.md]\n:frontmatter_layout: condensed\n")
       assert system('rake interleave_doc'), 'chaptered ebook TOC build failed'
-      xml = extract_docx_content('Ebook_Layout_draft_0.docx')
+      xml = extract_docx_content('Ebook_Layout_tpb_draft_0.docx')
       toc = xml[/<w:sdt\b.*?<\/w:sdt>/m]
       assert_includes toc, 'Preface'
       assert_includes toc, 'Beginning'
@@ -171,7 +202,7 @@ class InterleaveDocTest < Minitest::Test
       config_text = config_text.sub(':target_files: [fixtures/story_lopez.txt]', ':target_files: [story.txt]')
       File.write('.rakefile.yaml', config_text)
       assert system('rake interleave_doc'), 'nested ebook TOC build failed'
-      xml = extract_docx_content('Ebook_Layout_draft_0.docx')
+      xml = extract_docx_content('Ebook_Layout_tpb_draft_0.docx')
       toc = xml[/<w:sdt\b.*?<\/w:sdt>/m]
       rows = toc.scan(/<w:p\b.*?<\/w:p>/m)
       assert_includes rows.find { |p| p.include?('Act 1: Beginnings') }, '<w:ind w:left="0"'
@@ -216,7 +247,7 @@ class InterleaveDocTest < Minitest::Test
         :aftermatter_about_the_author: about.md
       YAML
       assert system('rake interleave_doc interleave_txt'), 'catalog build failed'
-      xml = extract_docx_content('Catalog_Test_draft_0.docx')
+      xml = extract_docx_content('Catalog_Test_ebook_draft_0.docx')
       body = xml.sub(/<w:sdt\b.*?<\/w:sdt>/m, '')
       refute_includes body, 'Current Book'
       assert_includes body, 'Next &amp; &lt;Novel&gt;'
@@ -224,10 +255,10 @@ class InterleaveDocTest < Minitest::Test
       assert_operator body.index('Story ending.'), :<, body.index('More in this universe')
       assert_operator body.index('Forthcoming Book'), :<, body.index('Author biography.')
       assert_includes xml[/<w:sdt\b.*?<\/w:sdt>/m], 'More in this universe'
-      rels = extract_docx_file('Catalog_Test_draft_0.docx', 'word/_rels/document.xml.rels')
+      rels = extract_docx_file('Catalog_Test_ebook_draft_0.docx', 'word/_rels/document.xml.rels')
       assert_includes rels, 'https://www.amazon.com/dp/B005JPPMS6'
       refute_includes rels, 'https://www.amazon.com/dp/B081MW4W4Z'
-      assert_includes File.read('Catalog_Test_draft_0.txt'), 'Next & <Novel>'
+      assert_includes File.read('Catalog_Test_ebook_draft_0.txt'), 'Next & <Novel>'
       refute_includes xml, 'DOCX_'
 
       refute_includes xml, 'Rate'
@@ -235,15 +266,15 @@ class InterleaveDocTest < Minitest::Test
       base_config = File.read('.rakefile.yaml')
       File.write('.rakefile.yaml', base_config + ":reader_review_url: #{review_url}\n")
       assert system('rake interleave_doc interleave_txt'), 'review link build failed'
-      xml = extract_docx_content('Catalog_Test_draft_0.docx')
+      xml = extract_docx_content('Catalog_Test_ebook_draft_0.docx')
       body = xml.sub(/<w:sdt\b.*?<\/w:sdt>/m, '')
       assert_includes body, 'Rate Catalog Test on Amazon'
       assert_includes body, 'Please leave an honest star rating'
       assert_operator body.index('Forthcoming Book'), :<, body.index('Please leave an honest star rating')
       assert_operator body.index('Rate Catalog Test'), :<, body.index('Author biography.')
-      assert_includes extract_docx_file('Catalog_Test_draft_0.docx', 'word/_rels/document.xml.rels'), review_url
-      assert_includes File.read('Catalog_Test_draft_0.txt'), review_url
-      html = File.read('Catalog_Test_draft_0.html')
+      assert_includes extract_docx_file('Catalog_Test_ebook_draft_0.docx', 'word/_rels/document.xml.rels'), review_url
+      assert_includes File.read('Catalog_Test_ebook_draft_0.txt'), review_url
+      html = docx_source_html
       assert_includes html, "<u><strong>Rate Catalog Test on Amazon</strong></u>"
       ['javascript:alert(1)', 'https://amazon.com.evil.example/review'].each do |invalid|
         File.write('.rakefile.yaml', base_config + ":reader_review_url: #{invalid}\n")
@@ -256,12 +287,12 @@ class InterleaveDocTest < Minitest::Test
       File.write('catalog.yaml', File.read('catalog.yaml').sub('Another adventure.', 'Updated description.'))
       File.write('.rakefile.yaml', File.read('.rakefile.yaml').sub(':book_id: current', ':book_id: next'))
       assert system('rake interleave_doc'), 'second book build failed'
-      xml = extract_docx_content('Catalog_Test_draft_0.docx')
+      xml = extract_docx_content('Catalog_Test_ebook_draft_0.docx')
       assert_includes xml, 'Current Book'
       refute_includes xml, 'Next &amp; &lt;Novel&gt;'
       File.write('.rakefile.yaml', File.read('.rakefile.yaml').sub(':book_id: next', ':book_id: current'))
       assert system('rake interleave_doc'), 'updated catalog build failed'
-      assert_includes extract_docx_content('Catalog_Test_draft_0.docx'), 'Updated description.'
+      assert_includes extract_docx_content('Catalog_Test_ebook_draft_0.docx'), 'Updated description.'
 
       File.write('.rakefile.yaml', File.read('.rakefile.yaml').sub(':book_id: current', ':book_id: typo'))
       output = IO.popen(['rake', 'interleave_doc'], err: [:child, :out], &:read)
@@ -312,12 +343,13 @@ class InterleaveDocTest < Minitest::Test
           edition_base = format == 'ebook' ? base.sub(':toc: false', ':toc: ebook') : base
           File.write('.rakefile.yaml', edition_base + series + ":edition_format: #{format}\n:reader_actions_lead: #{lead}\n")
           assert system('rake interleave_doc interleave_txt'), "#{format}/#{lead} failed"
-          docx = 'Action_Test_draft_0.docx'
+          basename = "Action_Test_#{format == 'ebook' ? 'ebook' : 'tpb'}_draft_0"
+          docx = "#{basename}.docx"
           xml = extract_docx_content(docx)
           toc = xml[/<w:sdt\b.*?<\/w:sdt>/m]
           xml = xml.sub(toc, '') if toc
-          text = File.read('Action_Test_draft_0.txt')
-          html = File.read('Action_Test_draft_0.html')
+          text = File.read("#{basename}.txt")
+          html = docx_source_html
           expected = ['Stay connected', 'Read new chapters free', 'What did you think?']
           lead == 'patreon' ? expected.push('More in this universe') : expected.unshift('More in this universe')
           expected.concat(['Books by Test Author', 'About the Author'])
@@ -344,6 +376,16 @@ class InterleaveDocTest < Minitest::Test
           end
           assert_includes text, review_url
           assert_includes xml, 'Forthcoming Book'
+          %w[Next Forthcoming].each do |title|
+            item = xml.scan(/<w:p\b.*?<\/w:p>/m).find { |p| p.include?(">#{title} Book</w:t>") }
+            refute_nil item
+            if format == 'print'
+              assert_includes item, '<w:jc w:val="center"/>'
+              assert_includes item, '<w:keepLines/>'
+            else
+              refute_includes item, '<w:jc w:val="center"/>'
+            end
+          end
           assert_equal 1, xml.scan(/<w:t[^>]*>Rate Action Test on Amazon<\/w:t>/).size
           refute_includes xml, 'DOCX_'
           rels = extract_docx_file(docx, 'word/_rels/document.xml.rels')
@@ -377,15 +419,15 @@ class InterleaveDocTest < Minitest::Test
       end
       File.write('.rakefile.yaml', base + ":edition_format: ebook\n")
       assert system('rake interleave_doc'), 'standalone failed'
-      xml = extract_docx_content('Action_Test_draft_0.docx')
+      xml = extract_docx_content('Action_Test_ebook_draft_0.docx')
       refute_includes xml, 'More in this universe'
       assert_includes xml, 'Read new chapters free'
       assert_includes xml, 'Rate Action Test on Amazon'
       File.write('actions.yaml', "patreon_url: https://www.patreon.com/cw/updated-author\n")
       assert system('rake interleave_doc'), 'shared update failed'
-      rels = extract_docx_file('Action_Test_draft_0.docx', 'word/_rels/document.xml.rels')
+      rels = extract_docx_file('Action_Test_ebook_draft_0.docx', 'word/_rels/document.xml.rels')
       assert_includes rels, 'https://www.patreon.com/cw/updated-author'
-      refute_includes extract_docx_content('Action_Test_draft_0.docx'), 'Explore my other books'
+      refute_includes extract_docx_content('Action_Test_ebook_draft_0.docx'), 'Explore my other books'
       [base.sub('1709969407', 'bad&asin'),
        base + ":reader_review_url: https://www.amazon.com/review/create-review/?asin=B081MW4W4Z\n",
        base + ":reader_actions_lead: typo\n",
@@ -403,7 +445,7 @@ class InterleaveDocTest < Minitest::Test
   def test_interleave_doc_creates_file
     Dir.chdir(@tmp) do
       system('rake interleave_doc') or raise 'rake failed'
-      assert File.exist?('Interleave_Test_draft_0.docx'), "draft docx should exist"
+      assert File.exist?('Interleave_Test_tpb_draft_0.docx'), "draft docx should exist"
     end
   end
 
@@ -421,10 +463,15 @@ class InterleaveDocTest < Minitest::Test
       YAML
       File.write('.rakefile.yaml', yaml_content)
 
-      system('rake interleave_doc') or raise 'rake failed'
-
-      assert File.exist?('Filename_Test_draft_7.docx')
-      assert File.exist?('Filename_Test_draft_7.html')
+      %w[ebook print].each do |format|
+        File.write('.rakefile.yaml', yaml_content + ":edition_format: #{format}\n")
+        assert system('rake interleave_doc interleave_txt'), "#{format} build failed"
+        label = format == 'ebook' ? 'ebook' : 'tpb'
+        %w[docx txt].each do |extension|
+          assert File.exist?("Filename_Test_#{label}_draft_7.#{extension}")
+        end
+      end
+      refute File.exist?('Filename_Test_draft_7.docx')
       refute File.exist?('output.docx')
     end
   end
@@ -445,10 +492,10 @@ class InterleaveDocTest < Minitest::Test
 
       system('rake interleave_doc') or raise 'rake failed'
 
-      assert File.exist?('Aristillus123_draft_7.docx')
-      assert File.exist?('Aristillus123_draft_7.html')
-      refute File.exist?('Aristillus:123_draft_7.docx')
-      refute File.exist?('Aristillus:123_draft_7.html')
+      assert File.exist?('Aristillus123_tpb_draft_7.docx')
+      refute File.exist?('Aristillus123_tpb_draft_7.html')
+      refute File.exist?('Aristillus:123_tpb_draft_7.docx')
+      refute File.exist?('Aristillus:123_tpb_draft_7.html')
     end
   end
 
@@ -610,7 +657,7 @@ class InterleaveDocTest < Minitest::Test
 
       assert system('rake interleave_doc'), 'rake interleave_doc failed'
       xml = extract_docx_content(Dir['*_draft_0.docx'].first).force_encoding('UTF-8')
-      html = File.read(Dir['*_draft_0.html'].first)
+      html = docx_source_html
 
       refute_match(/\[\^source\]/, xml)
       assert_match(/<w:vertAlign w:val="superscript"\s*\/>.*?<w:t[^>]*>1<\/w:t>/m, xml)
@@ -680,7 +727,7 @@ class InterleaveDocTest < Minitest::Test
       system('rake interleave_doc') or raise 'rake failed'
       
       content_xml = extract_docx_content(Dir['*_draft_0.docx'].first)
-      html = File.read(Dir['*_draft_0.html'].first)
+      html = docx_source_html
       visible_html = html.delete("\u2060")
       
       assert content_xml.include?('<w:i/>') || content_xml.include?('<w:i'), "Document should contain italic formatting"
@@ -690,6 +737,15 @@ class InterleaveDocTest < Minitest::Test
       assert_includes content_xml, 'A&#8288;r&#8288;i&#8288;s&#8288;t&#8288;i&#8288;l&#8288;l&#8288;u&#8288;s'
       refute_includes html, '<b> and </b>'
       refute_includes content_xml, 'This remains a scene marker.'
+
+      File.write('.rakefile.yaml', yaml_content + ":edition_format: ebook\n")
+      assert system('rake interleave_doc'), 'ebook build failed'
+      ebook_xml = extract_docx_content(Dir['*_ebook_draft_0.docx'].first)
+      ebook_html = docx_source_html
+      refute_match(/\u2060|&#(?:8288|x2060);/i, ebook_xml)
+      refute_includes ebook_html, "\u2060"
+      assert_includes ebook_xml, 'Aristillus'
+      assert_match(/<b>The Aristillus\s+Engineering Club<\/b>/, ebook_html)
     end
   end
 
@@ -835,8 +891,9 @@ class InterleaveDocTest < Minitest::Test
 
   def test_shared_bibliography_links_follow_edition_format_only
     Dir.chdir(@tmp) do
-      bibliography = "# Other Books\n\n* [Book *One* & Two](https://www.amazon.com/dp/B081PBXBMB)\n* Unlisted Book\n"
+      bibliography = "# Other Books\n\n## Cast\n\n* [Book *One* & Two](https://www.amazon.com/dp/B081PBXBMB)\n* Unlisted Book\n"
       File.write('other_books.md', bibliography)
+      File.write('preface.md', "# Cast\n\nFrontmatter.\n")
       File.write('stay.md', "[Author website](https://example.com/author)\n")
       [[nil, true], ['print', false], ['ebook', true], ['ebook', false]].each do |format, half_title|
         config = <<~YAML
@@ -847,6 +904,7 @@ class InterleaveDocTest < Minitest::Test
           :toc: false
           :title_page:
             show_half_title: #{half_title}
+          :frontmatter: [preface.md]
           :other_books: other_books.md
           :aftermatter_stay_connected: stay.md
           :other_books_link:
@@ -856,13 +914,17 @@ class InterleaveDocTest < Minitest::Test
         config += ":edition_format: #{format}\n" if format
         File.write('.rakefile.yaml', config)
         assert system('rake interleave_doc'), "#{format.inspect}/#{half_title} build failed"
-        docx = 'Bibliography_Links_draft_0.docx'
+        basename = "Bibliography_Links_#{format == 'ebook' ? 'ebook' : 'tpb'}_draft_0"
+        docx = "#{basename}.docx"
         xml = extract_docx_content(docx)
         rels = extract_docx_file(docx, 'word/_rels/document.xml.rels')
-        html = File.read('Bibliography_Links_draft_0.html')
+        html = docx_source_html
         section = html[/<section class="half-title-verso">.*?<\/section>/m]
         assert_includes section, 'Book <em>One</em> &amp; Two'
         assert_includes section, 'Unlisted Book'
+        assert_includes section, 'id="other-books-cast"'
+        assert_equal 1, xml.scan('w:name="cast"').size
+        assert_equal 1, xml.scan('w:name="other-books-cast"').size
         assert_includes rels, 'https://example.com/author'
         assert_equal bibliography, File.read('other_books.md')
         if format == 'ebook'
@@ -905,13 +967,13 @@ class InterleaveDocTest < Minitest::Test
             label: More books & stories
         YAML
         assert system('rake interleave_doc'), "#{format} build failed"
-        xml = extract_docx_content('Destination_Test_draft_0.docx')
-        html = File.read('Destination_Test_draft_0.html')
+        xml = extract_docx_content('Destination_Test_tpb_draft_0.docx')
+        html = docx_source_html
         assert_equal 1, xml.scan('More books &amp; stories').size
         assert_operator xml.index('Book One'), :<, xml.index('More books &amp; stories')
         assert_equal "# Other Books\n\nBook One\n", File.read('other_books.md')
         if format == 'link'
-          rels = extract_docx_file('Destination_Test_draft_0.docx', 'word/_rels/document.xml.rels')
+          rels = extract_docx_file('Destination_Test_tpb_draft_0.docx', 'word/_rels/document.xml.rels')
           assert_includes rels, url.gsub('&', '&amp;')
           assert_includes xml, '<w:hyperlink'
           assert_includes xml, '<w:u w:val="single"'
@@ -1016,6 +1078,8 @@ class InterleaveDocTest < Minitest::Test
       File.write('dramatis.md', <<~MD)
         ## Dramatis Personae
 
+        ### Mission crew
+
         **Roch** — Mission commander and astrogator. The oldest Dog on the mission. Childless.
 
         **Bollstadt** — Mission geologist. The youngest Dog. Brilliant. Obsessed. Trichromat (can see the color red).
@@ -1037,14 +1101,75 @@ class InterleaveDocTest < Minitest::Test
       content_xml = extract_docx_content(docx_file)
       styles_xml = extract_docx_file(docx_file, 'word/styles.xml')
 
-      assert_match(/w:style w:type="paragraph" w:styleId="FrontmatterDramatisHeading".*?w:after="200"/m, styles_xml)
-      assert_match(/w:style w:type="paragraph" w:styleId="FrontmatterDramatis".*?w:left="1584".*?w:hanging="1584".*?w:tab w:val="left" w:pos="1584".*?w:suppressAutoHyphens/m, styles_xml)
+      heading = styles_xml[/<w:style[^>]*w:styleId="FrontmatterDramatisHeading".*?<\/w:style>/m]
+      subheading = styles_xml[/<w:style[^>]*w:styleId="FrontmatterDramatisSubheading".*?<\/w:style>/m]
+      assert_includes heading, '<w:sz w:val="30"'
+      assert_includes heading, '<w:jc w:val="center"'
+      assert_includes subheading, '<w:sz w:val="22"'
+      assert_includes subheading, '<w:jc w:val="left"'
+      assert_includes subheading, '<w:spacing w:before="240"'
+      assert_match(/<w:keepNext\s*\/>/, subheading)
+      assert_match(/<w:pStyle w:val="FrontmatterDramatisSubheading"\s*\/>.*?Mission crew/m, content_xml)
+      assert_match(/w:style w:type="paragraph" w:styleId="FrontmatterDramatis".*?w:left="216".*?w:hanging="216".*?w:suppressAutoHyphens/m, styles_xml)
       assert_match(/<w:pStyle w:val="FrontmatterDramatisHeading"\s*\/>.*?Dramatis Personae/m, content_xml)
-      assert_match(/<w:pStyle w:val="FrontmatterDramatis"\s*\/>.*?Roch.*?<w:tab\/>.*?Mission commander/m, content_xml)
+      assert_match(/<w:pStyle w:val="FrontmatterDramatis"\s*\/>.*?Roch.*?Mission commander/m, content_xml)
       dramatis_end = content_xml.index('Bollstadt')
       page_break = content_xml.index(/<w:br w:type="page"\s*\/>/, dramatis_end)
       assert_operator dramatis_end, :<, page_break
       refute_match(/DOCX_FRONTMATTER_DRAMATIS_START|DOCX_FRONTMATTER_DRAMATIS_END/, content_xml)
+    end
+  end
+
+  def test_docx_applies_dramatis_heading_hierarchy_to_legacy_frontmatter
+    Dir.chdir(@tmp) do
+      File.write('dramatis.md', <<~MD)
+        # <b>Dramatis Personæ</b>
+
+        ### <b>On Earth, Government</b>
+
+        President Johnson - President of the United States.
+
+        Senator Haig - Senator from Maryland.
+
+        ## On the Moon
+
+        Mike Martin - CEO.
+
+        Javier Borda - CEO of First Class Homes.
+      MD
+      File.write('epigraph.md', "# Epigraph\n\nA quotation.\n")
+      File.write('.rakefile.yaml', <<~YAML)
+        :target_files: [fixtures/story_lopez.txt]
+        :frontmatter: [dramatis.md, epigraph.md]
+        :frontmatter_layout: condensed
+        :toc: ebook
+        :title: Test
+        :target_words: 1000
+        :chapter_head_tag: '** chapter'
+        :date_start: '1 Jan 1970'
+      YAML
+      assert system('rake interleave_doc'), 'rake interleave_doc failed'
+      xml = extract_docx_content(Dir['*_draft_0.docx'].first).force_encoding('UTF-8')
+      paragraphs = xml.scan(/<w:p\b.*?<\/w:p>/m)
+      title = paragraphs.find { |p| p.include?('Dramatis Personæ') && !p.include?('<w:hyperlink') }
+      assert_includes title, '<w:pStyle w:val="FrontmatterDramatisHeading"/>'
+      ['On Earth, Government', 'On the Moon'].each do |text|
+        paragraph = paragraphs.find { |p| p.include?(text) }
+        assert_includes paragraph, '<w:pStyle w:val="FrontmatterDramatisSubheading"/>'
+        refute_match(/<w:hyperlink[^>]*>.*?#{Regexp.escape(text)}/m, xml.scan(/<w:hyperlink.*?<\/w:hyperlink>/m).join)
+      end
+      entry = paragraphs.find { |p| p.include?('President Johnson') }
+      assert_includes entry, 'FrontmatterDramatis'
+      ['President Johnson', 'Senator Haig', 'Mike Martin', 'Javier Borda'].each do |name|
+        paragraph = paragraphs.find { |p| p.include?(name) }
+        assert_includes paragraph, '<w:pStyle w:val="FrontmatterDramatis"/>'
+        assert_includes paragraph, '<w:keepLines/>'
+        refute_match(/<w:(?:ind|spacing)\b/, paragraph)
+      end
+      epigraph = paragraphs.find { |p| p.include?('Epigraph') && !p.include?('<w:hyperlink') }
+      assert_includes epigraph, '<w:pStyle w:val="FrontmatterHeading1"/>'
+      assert_match(/<w:hyperlink[^>]*>.*?Dramatis Personæ/m, xml)
+      refute_includes xml, 'DOCX_FRONTMATTER_DRAMATIS'
     end
   end
 
@@ -1079,7 +1204,7 @@ class InterleaveDocTest < Minitest::Test
       system('rake interleave_doc') or raise 'rake failed'
 
       content_xml = extract_docx_content(Dir['*_draft_0.docx'].first)
-      generated_html = File.read(Dir['*_draft_0.html'].first)
+      generated_html = docx_source_html
 
       assert content_xml.include?('Test Novel'), "Document should contain title page title"
       assert content_xml.include?('Test Author'), "Document should contain title page author"
@@ -1268,16 +1393,22 @@ class InterleaveDocTest < Minitest::Test
       assert_match(/Printed in the United States of America/, content_xml)
       refute_match(/First edition/, content_xml)
       refute_match(/DOCX_COPYRIGHT_/, content_xml)
-      history = ['November 2019: First published.',
-                 'September 2026: Typographical corrections.',
-                 'September 27, 2026: Reader links &amp; &lt;bibliography&gt; updated.']
-      history.each { |entry| assert_includes content_xml, entry }
+      history = [['Nov 2019:', 'First published.'],
+                 ['Sep 2026:', 'Typographical corrections.'],
+                 ['Sep 27, 2026:', 'Reader links &amp; &lt;bibliography&gt; updated.']]
+      history_paragraphs = content_xml.scan(/<w:p\b.*?<\/w:p>/m).select { |p| history.any? { |date, _| p.include?(date) } }
+      assert_equal 3, history_paragraphs.size
+      history.zip(history_paragraphs).each do |(date, description), paragraph|
+        assert_includes paragraph, date
+        assert_includes paragraph, description
+        assert_includes paragraph, '<w:tab w:val="left" w:pos="1800"/>'
+        assert_includes paragraph, '<w:ind w:left="1800" w:hanging="1440"/>'
+        assert_equal 1, paragraph.scan(/<w:tab\s*\/>/).size
+        refute_match(/<w:br\b/, paragraph)
+      end
       assert_equal 1, content_xml.scan('Revision history:').size
-      history_paragraph = content_xml.scan(/<w:p\b.*?<\/w:p>/m).find { |p| p.include?(history.first) }
-      assert_includes history_paragraph, '<w:ind w:left="360" w:firstLine="0"/>'
-      assert_equal 2, history_paragraph.scan(/<w:br\s*\/>/).size
-      assert_operator content_xml.index('Revision history:'), :<, content_xml.index(history.first)
-      positions = history.map { |entry| content_xml.index(entry) }
+      assert_operator content_xml.index('Revision history:'), :<, content_xml.index(history.first.first)
+      positions = history.map { |date, _| content_xml.index(date) }
       assert_equal positions.sort, positions
       assert_operator content_xml.index('Cover design by Jennifer Corcoran.'), :<, content_xml.index('Revision history:')
       assert_operator content_xml.index('Ebook ISBN: 978-1-235'), :<, content_xml.index('Revision history:')
@@ -1313,6 +1444,43 @@ class InterleaveDocTest < Minitest::Test
 
       assert $?.success?, 'rake interleave_doc should succeed'
       assert_match(/:TOC not specified in :frontmatter; adding in default location/, out)
+    end
+  end
+
+  def test_manuscript_bookmark_survives_libreoffice_refresh_without_duplicates
+    Dir.chdir(@tmp) do
+      File.write('story.txt', "** chapter 1: First chapter\n\nOpening paragraph.\n\n** chapter 2: Last chapter\n\nClosing paragraph.\n")
+      File.write('after.md', "# After the Story\n\nOutside the manuscript bookmark.\n")
+      File.write('.rakefile.yaml', <<~YAML)
+        :target_files: [story.txt]
+        :title: Bookmark Test
+        :date_start: '2026-09-01'
+        :chapter_head_tag: '** chapter'
+        :toc: false
+        :aftermatter: [after.md]
+      YAML
+      ['1', nil].each do |skip_refresh|
+        if skip_refresh.nil?
+          skip 'LibreOffice is required for the round-trip check' unless system('libreoffice', '--version', out: File::NULL, err: File::NULL)
+        end
+        assert system({'RAKEFILE_SKIP_DOCX_TOC_REFRESH' => skip_refresh}, 'rake interleave_doc'), 'bookmark build failed'
+        docx = 'Bookmark_Test_tpb_draft_0.docx'
+        xml = extract_docx_content(docx)
+        starts = xml.scan(/<w:bookmarkStart\b[^>]*w:name="RakefileManuscriptBody"[^>]*\/>/)
+        assert_equal 1, starts.size
+        id = starts.first[/w:id="(\d+)"/, 1]
+        ends = xml.scan(/<w:bookmarkEnd\b[^>]*w:id="#{id}"[^>]*\/>/)
+        assert_equal 1, ends.size
+        range = xml[xml.index(starts.first)...xml.index(ends.first)]
+        assert_includes range, 'First chapter'
+        assert_includes range, 'Opening paragraph.'
+        assert_includes range, 'Last chapter'
+        assert_includes range, 'Closing paragraph.'
+        refute_includes range, 'After the Story'
+        if skip_refresh.nil?
+          assert_includes extract_docx_file(docx, 'docProps/app.xml'), '<Application>LibreOffice/'
+        end
+      end
     end
   end
 
@@ -1559,7 +1727,7 @@ class InterleaveDocTest < Minitest::Test
 
   def test_docx_places_aftermatter_after_manuscript
     Dir.chdir(@tmp) do
-      File.write('about.md', "# About the Author\n\nBio text.\n")
+      File.write('about.md', "# Further Reading\n\nReading text.\n\n## Economics\n\n- comparative advantage\n- futarchy\n")
       File.write('.rakefile.yaml', <<~YAML)
         :target_files:
           - fixtures/story_lopez.txt
@@ -1577,9 +1745,50 @@ class InterleaveDocTest < Minitest::Test
 
       content_xml = extract_docx_content(Dir['*_draft_0.docx'].first)
 
-      assert content_xml.index('Beta') < content_xml.index('About the Author')
-      assert content_xml.include?('Bio text.')
+      assert content_xml.index('Beta') < content_xml.index('Further Reading')
+      assert content_xml.include?('Reading text.')
+      heading = content_xml.scan(/<w:p\b.*?<\/w:p>/m).find { |p| p.include?('Further Reading') }
+      assert_includes heading, '<w:pStyle w:val="AboutAuthorHeading"/>'
+      assert_match(/w:before="216".*?w:after="144"/, heading)
+      styles_xml = extract_docx_file(Dir['*_draft_0.docx'].first, 'word/styles.xml')
+      assert_match(/w:style w:type="paragraph" w:styleId="AboutAuthorHeading".*?w:sz w:val="28"/m, styles_xml)
+      assert_match(/w:style w:type="paragraph" w:styleId="Heading1".*?w:sz w:val="80"/m, styles_xml)
+      subheading = content_xml.scan(/<w:p\b.*?<\/w:p>/m).find { |p| p.include?('Economics') }
+      assert_includes subheading, '<w:pStyle w:val="FrontmatterHeading2"/>'
+      list_item = content_xml.scan(/<w:p\b.*?<\/w:p>/m).find { |p| p.include?('futarchy') }
+      assert_includes list_item, '<w:numPr>'
+      refute_match(/DOCX_SUPPLEMENT_/, content_xml)
       refute_match(/DOCX_AFTERMATTER_PAGE_BREAK_/, content_xml)
+    end
+  end
+
+  def test_plain_text_bio_x_profile_is_clickable_only_in_ebooks
+    Dir.chdir(@tmp) do
+      File.write('bio.txt', "A biography with D&D.\n\nFind him on X (Twitter): x.com/morlockp\n")
+      %w[ebook print].each do |format|
+        File.write('.rakefile.yaml', <<~YAML)
+          :target_files: [fixtures/story_lopez.txt]
+          :title: Bio Link
+          :chapter_head_tag: '** chapter'
+          :date_start: '1 Jan 1970'
+          :aftermatter_about_the_author: bio.txt
+          :edition_format: #{format}
+          :toc: false
+        YAML
+        assert system('rake interleave_doc')
+        edition = format == 'ebook' ? 'ebook' : 'tpb'
+        file = "Bio_Link_#{edition}_draft_0.docx"
+        xml = extract_docx_content(file)
+        rels = extract_docx_file(file, 'word/_rels/document.xml.rels')
+        assert_includes xml, 'x.com/morlockp'
+        assert_includes xml, 'D&amp;D'
+        if format == 'ebook'
+          assert_includes rels, 'Target="https://x.com/morlockp"'
+          assert_match(/<w:hyperlink\b[^>]*>.*?x\.com\/morlockp.*?<\/w:hyperlink>/m, xml)
+        else
+          refute_includes rels, 'https://x.com/morlockp'
+        end
+      end
     end
   end
 
@@ -1631,7 +1840,7 @@ class InterleaveDocTest < Minitest::Test
 
       out = `rake interleave_doc 2>&1`
 
-      assert $?.success?, 'rake interleave_doc should fall back when reference file is missing'
+      assert $?.success?, "rake interleave_doc should fall back when reference file is missing: #{out}"
       assert_match(/DOCX reference file missing-reference\.docx not found/, out)
       assert File.exist?(Dir['*_draft_0.docx'].first.to_s), "output.docx should still exist"
     end
@@ -1663,11 +1872,11 @@ class InterleaveDocTest < Minitest::Test
       rels_xml = extract_docx_file(docx_file, 'word/_rels/document.xml.rels')
       odd_footer_id = rels_xml[/Id="([^"]+)"[^>]*Target="footer1\.xml"/, 1]
       even_footer_id = rels_xml[/Id="([^"]+)"[^>]*Target="footer2\.xml"/, 1]
-      assert_match(/w:ascii="Garamond"/, styles_xml)
+      assert_match(/w:ascii="EB Garamond"/, styles_xml)
       assert_match(/w:color w:val="000000"/, styles_xml)
-      assert_match(/w:style w:type="paragraph" w:default="1" w:styleId="Normal".*?<w:ind w:firstLine="288"\s*\/>.*?w:line="240".*?w:sz w:val="22"/m, styles_xml)
-      assert_match(/w:style w:type="paragraph" w:styleId="BodyText".*?<w:ind w:firstLine="288"\s*\/>.*?w:sz w:val="22"/m, styles_xml)
-      assert_match(/w:style w:type="paragraph" w:styleId="FirstParagraph".*?w:firstLine="0".*?w:sz w:val="22"/m, styles_xml)
+      assert_match(/w:style w:type="paragraph" w:default="1" w:styleId="Normal".*?<w:ind w:firstLine="288"\s*\/>.*?w:line="240".*?w:sz w:val="24"/m, styles_xml)
+      assert_match(/w:style w:type="paragraph" w:styleId="BodyText".*?<w:ind w:firstLine="288"\s*\/>.*?w:sz w:val="24"/m, styles_xml)
+      assert_match(/w:style w:type="paragraph" w:styleId="FirstParagraph".*?w:firstLine="0".*?w:sz w:val="24"/m, styles_xml)
       assert_match(/w:style w:type="paragraph" w:styleId="Compact".*?w:firstLine="0".*?w:after="0"/m, styles_xml)
       assert_match(/w:style w:type="paragraph" w:styleId="Heading1".*?w:sz w:val="80"/m, styles_xml)
       assert_match(/w:style w:type="paragraph" w:styleId="TitlePageTitle".*?w:sz w:val="72"/m, styles_xml)
@@ -1675,7 +1884,7 @@ class InterleaveDocTest < Minitest::Test
       assert_match(/w:style w:type="paragraph" w:styleId="TitlePageTitle".*?<w:suppressAutoHyphens\s*\/>/m, styles_xml)
       assert_match(/w:style w:type="paragraph" w:styleId="TitlePageAuthor".*?<w:suppressAutoHyphens\s*\/>/m, styles_xml)
       assert_match(/w:pgSz w:w="8640" w:h="12960"/, document_xml)
-      assert_match(/w:pgMar w:top="1138" w:right="1138" w:bottom="1426" w:left="1138"/, document_xml)
+      assert_match(/w:pgMar w:top="1138" w:right="936" w:bottom="1426" w:left="1008"/, document_xml)
       assert_match(/w:mirrorMargins/, settings_xml)
       assert_match(/w:evenAndOddHeaders/, settings_xml)
       assert_match(/w:autoHyphenation/, settings_xml)
@@ -1695,6 +1904,11 @@ class InterleaveDocTest < Minitest::Test
   def test_interleave_doc_uses_reference_docx_by_default
     Dir.chdir(@tmp) do
       system('rake init') or raise 'rake init failed'
+      # A cached reference from the previous default must refresh even when newer than YAML.
+      Zip::File.open('.default.docx') do |zip|
+        xml = zip.read('word/styles.xml').gsub('EB Garamond', 'Garamond')
+        zip.get_output_stream('word/styles.xml') { |file| file.write(xml) }
+      end
       yaml_content = <<~YAML
         :target_files:
           - fixtures/story_lopez.txt
@@ -1709,7 +1923,7 @@ class InterleaveDocTest < Minitest::Test
       system('rake interleave_doc') or raise 'rake interleave_doc failed'
 
       styles_xml = extract_docx_file(Dir['*_draft_0.docx'].first, 'word/styles.xml')
-      assert_match(/w:ascii="Garamond"/, styles_xml)
+      assert_match(/w:ascii="EB Garamond"/, styles_xml)
       assert_match(/w:color w:val="000000"/, styles_xml)
     end
   end
@@ -1739,6 +1953,7 @@ class InterleaveDocTest < Minitest::Test
           - fixtures/story_lopez.txt
           - fixtures/story_spacex.txt
         :title: Test
+        :print_margins: false
         :target_words: 1000
         :chapter_head_tag: '** chapter'
         :date_start: '1 Jan 1970'
@@ -1761,6 +1976,21 @@ class InterleaveDocTest < Minitest::Test
   end
 
   private
+
+  # Inspect the formatter's HTML without requiring a retained build artifact.
+  def docx_source_html
+    script = <<~RUBY
+      require 'rake'
+      load './rakefile'
+      cfg = load_rakefile_config('.rakefile.yaml')
+      result = build_interleaved_chapters_for_targets(cfg)
+      chapters = docx_include_review_notes?(cfg) ? result[:interleaved] : without_review_notes(result[:interleaved])
+      print format_interleaved_as_html(chapters, cfg, true, true, true)
+    RUBY
+    html = IO.popen([RbConfig.ruby, '-e', script], &:read)
+    assert $?.success?, 'HTML formatting failed'
+    html
+  end
 
   def extract_docx_content(docx_file)
     # DOCX is a ZIP archive

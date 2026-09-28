@@ -23,6 +23,36 @@ Configuration meanings:
 - :size_cutoff_force_done: an optional string that tells the script that an overly short (see line above) chapter is actually complete
 - :size_cutoff_force_incomplete: an optional string that tells the script that an overly long chapter should still be treated as incomplete
 
+### Generate upload files
+
+Run `rake generate` in an edition directory. It uses `:edition_format` from
+`.rakefile.yaml`: ebooks produce DOCX; print editions produce PDF.
+Override the retained formats when needed:
+
+```yaml
+:edition_format: ebook
+:generated_files: [docx] # or [pdf], or [docx, pdf]; leading dots also accepted
+```
+
+Successful DOCX/PDF builds remove their intermediate HTML. A PDF-only
+`rake generate` also removes the intermediate DOCX after the PDF succeeds.
+If conversion fails, the intermediate for the failed step remains for diagnosis.
+Only this title/edition/draft's build files are cleaned; historical outputs remain.
+
+Explicit `rake docx` and `rake pdf` still request those formats (`rake pdf`
+retains its DOCX). `rake interleave_html` explicitly creates a retained HTML file.
+Plain `rake` continues to show writing-progress statistics.
+
+### Generated filenames
+
+Generated TXT, HTML, DOCX, and PDF files include the edition before the draft number:
+
+- `:edition_format: ebook` → `Glomar_Extractor_ebook_draft_2.docx`
+- `:edition_format: print` (the default) → `Glomar_Extractor_tpb_draft_2.docx`
+
+The name follows the configuration, not the directory name. Existing files with
+older names are not automatically deleted when you regenerate.
+
 ### Chapter epigraphs
 
 Put a blockquote immediately after a chapter heading to make it a DOCX epigraph.
@@ -67,6 +97,10 @@ To keep proper nouns intact in DOCX output, list exact words in
   - Bollstadt
 ```
 
+`:never_hyphenate` applies only to print. Ebook output leaves words intact because
+Kindle conversion can render inserted word joiners as visible letter spacing.
+
+
 The word can still move as a whole to the next line, but automatic hyphenation
 will not split it. Source text remains unchanged.
 
@@ -91,6 +125,18 @@ dedication is omitted without leaving its blank verso.
 ```
 
 The named Timeline and Dramatis files receive their corresponding DOCX styles.
+Dramatis Personae uses a centered, bold 15-point title and left-aligned, bold
+11-point subsection headings, with 12 points of space above each subsection.
+The first heading is the title; subsequent headings are subsections, regardless
+of their Markdown level. Only the title appears in the ebook contents.
+Character entries use 11-point type, exact 13-point leading, 3 points of space
+between entries, and a 0.15-inch hanging indent (first line flush left).
+Entries stay together across page breaks and do not automatically hyphenate.
+These defaults are configurable through `frontmatter_dramatis_heading`,
+`frontmatter_dramatis_subheading`, and `frontmatter_dramatis` in `.docx_styles.yaml`.
+Legacy frontmatter whose first heading reads “Dramatis Personae” or
+“Dramatis Personæ” receives the same heading and entry styles, preserving inline
+emphasis and wording.
 `other_books` is set on the half-title verso, the conventional “also by this
 author” location. For ebooks, set `:title_page: {show_half_title: false}` to
 omit the half-title and move Other Books to the back, after Stay Connected and
@@ -135,7 +181,9 @@ require listing the bibliography in `:matter_qr_codes`.
 
 Use these named fields for material after the manuscript. `aftermatter_other`
 is a YAML list, in reading order; About the Author is automatically headed and
-uses its dedicated DOCX style.
+uses its dedicated DOCX style. Supplementary `aftermatter_other` headings use
+the compact back matter heading style, rather than the oversized manuscript
+part-title style; body paragraphs and lists retain their formatting.
 
 ```
 :aftermatter_about_the_author: ./matter_after_about_the_author.md
@@ -251,15 +299,20 @@ Copyright pages can include an explicit publication history, independent of
     - date: '2019-11'
       description: First published.
     - date: '2026-09'
-      description: typo fixes and updated bibliography.
+      description: Typo fixes and updated bibliography.
 ```
 
 Entries appear chronologically after credits, ISBNs, and printing details,
 immediately before the publisher block, under “Revision history:” with one
-indented line per entry. Keep descriptions short enough for the chosen page width.
+indented paragraph per entry. Dates use three-letter months, followed by a colon
+and a tab to a fixed description column one inch after the date's start.
+Wrapped descriptions align beneath the description, not beneath the date.
+Use sentence case and a final period for descriptions (for example,
+“Typo fixes and updated bibliography.”); the tool preserves supplied wording.
+Keep descriptions short enough for the chosen page width.
 The publisher name and URLs form a horizontally centered block near 80% down the
 DOCX copyright page, leaving whitespace beneath it; they remain document content rather than a recurring footer. Dates accept `YYYY-MM` or `YYYY-MM-DD` and
-render as “November 2019” or “September 27, 2026.” Each entry needs a nonblank
+render as “Nov 2019” or “Sep 27, 2026.” Each entry needs a nonblank
 `description`; invalid dates or malformed entries stop the build with an error.
 Omit `revision_history` or use `[]` to leave it out. Add entries deliberately
 when publishing an update; builds do not invent or append history. If the old
@@ -384,3 +437,107 @@ Set `:toc: false` to omit the
 DOCX table of contents. For an ebook-source DOCX, `.docx_styles.yaml` can disable
 print pagination with `page_numbers: {enabled: false}` and
 `page: {body_start_on_recto: false, mirror_margins: false, even_odd_headers: false, auto_hyphenation: false}`.
+
+DOCX typography defaults to **EB Garamond**, using the installed font family by
+that exact name. A project can override `font` in `.docx_styles.yaml`. Existing
+explicit font choices are retained; cached default references refresh when the
+configured font differs. Install the regular, italic, bold, and bold italic faces
+on each machine used to render print interiors.
+
+Fiction body text defaults to 12-point EB Garamond Regular, black, with
+indented paragraphs and no extra paragraph gap. Existing print edition configs
+use 15-point leading for Normal, FirstParagraph, and Compact. Ebook-source
+configs use single/automatic spacing; Kindle readers retain control of their
+font, size, and spacing. DOCX font naming alone does not embed an ebook font.
+Escape the City's legacy nonfiction layout is excluded from this rollout.
+Manuscript-specific double spacing remains where explicitly configured.
+
+`line_spacing_points: 15` means exactly 15 points in DOCX. Otherwise
+`line_spacing` accepts `single`, `double`, or a positive numeric multiple such
+as `1.25`. Cached `.default.docx` styles refresh when effective typography
+changes, including inherited defaults. Rebuild and proof print interiors and
+recheck cover spine widths after a typography change.
+
+### Paperback margins
+
+For 6×9 print editions, `rake generate`, `rake pdf`, and `rake docx` automatically
+use mirrored margins based on the rendered page count:
+
+| Pages | Inside | Outside |
+| --- | --- | --- |
+| 1–199 | 0.70″ | 0.65″ |
+| 200–399 | 0.80″ | 0.65″ |
+| 400–499 | 0.90″ | 0.65″ |
+| 500+ | 0.95″ | 0.65″ |
+
+The build starts with the smallest allowance and increases it if the rendered
+page count needs a larger one, re-rendering until no increase is needed. This
+also measures print DOCX builds using a temporary PDF; LibreOffice and `pdfinfo`
+are required. Final PDFs replace the previous output only after success.
+Top/bottom margins remain unchanged. Automatic margins supersede the legacy
+left/right values in `.docx_styles.yaml`; the file itself is not rewritten.
+Ebooks and other trim sizes retain their existing margins.
+
+In `.rakefile.yaml`, use one of:
+
+```yaml
+:print_margins: auto # default for 6×9 paperbacks
+# :print_margins: {inside: 0.95, outside: 0.65} # fixed override, inches
+# :print_margins: false # retain the margins in .docx_styles.yaml
+:print_binding: paperback # default; hardcover also enforces its page limits
+```
+
+A fixed override can also be used for other print trim sizes or bindings.
+Review final pagination and cover spine dimensions after changing margins.
+
+### Hardcover generation
+
+Set `:edition_format: print`, `:print_binding: hardcover`, and
+`:generated_files: [pdf]` in the hardcover edition directory. Output filenames
+use `_hc_`. Reuse the manuscript and shared matter paths, and supply the
+hardcover ISBN under `copyright_page: isbn: hardcover`; do not copy the
+paperback ISBN into that field. The cover must be sized separately for the
+final hardcover page count and paper.
+
+Hardcover builds first try the configured paperback typography. At 6×9 they
+inherit the same page-count-based mirrored margins; explicit `print_margins`
+overrides still apply. If the baseline fits 75–550 printed pages, it is kept.
+Otherwise the following presets are tried in order, stopping at the first fit:
+
+| Preset | Body / leading (pt) | Top / bottom (in) |
+| --- | --- | --- |
+| tighter_spacing | 12 / 14.5 | 0.70 / 0.80 |
+| compact_spacing | 12 / 14 | 0.70 / 0.80 |
+| smaller_type | 11.5 / 14 | 0.70 / 0.80 |
+| minimum_type | 11 / 13.5 | 0.70 / 0.80 |
+
+Font family, inside/outside margins, headings, and dedicated front/back-matter
+styles are retained. Only Normal, FirstParagraph and Compact body styles change.
+The footer moves with the bottom margin, keeping 0.20″ clearance. Automatic
+inside margins never decrease during fitting. Candidates and the selected
+layout are reported in the build log. A fitting result may leave a few pages
+of headroom; no arbitrary shrinking to hit an exact page count is performed.
+
+Optional `.rakefile.yaml` overrides:
+
+```yaml
+:hardcover_layout:
+  min_pages: 75
+  max_pages: 550
+  presets:
+  - name: compact
+    body_size: 11.5
+    leading: 14
+    top_margin: 0.70
+    bottom_margin: 0.80
+```
+
+Omitted fields use the defaults; a supplied preset list replaces the default
+list. `presets: []` checks the baseline without compression. Body sizes must
+be at least 11pt in half-point steps; leading must be at least 13.5pt and at
+least 1.5pt greater than body size. These are conservative defaults for our
+fiction, with final visual review still required. Page counts are measured
+from rendered PDFs and rounded up to an even printed count. Too-short books
+and books exceeding the limit after all presets fail with a clear error;
+no padding is added, and the previous final PDF is preserved. This check also
+runs for `rake docx`. Ebooks and paperback output selection are unaffected.

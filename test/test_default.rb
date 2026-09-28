@@ -138,10 +138,10 @@ class DefaultTaskTest < Minitest::Test
       assert File.exist?('.default.docx')
 
       docx_styles = YAML.load_file('.docx_styles.yaml')
-      assert_equal 'Garamond', docx_styles['font']
+      assert_equal 'EB Garamond', docx_styles['font']
       assert_equal 6, docx_styles['page']['width_inches']
       assert_equal 9, docx_styles['page']['height_inches']
-      assert_equal 11, docx_styles['styles']['normal']['size']
+      assert_equal 12, docx_styles['styles']['normal']['size']
       assert_equal 40, docx_styles['styles']['heading_1']['size']
       assert_equal 36, docx_styles['styles']['title_page_title']['size']
       assert_equal 20, docx_styles['styles']['title_page_author']['size']
@@ -180,11 +180,12 @@ class DefaultTaskTest < Minitest::Test
       footer_odd_xml = extract_docx_file('.default.docx', 'word/footer1.xml')
       footer_even_xml = extract_docx_file('.default.docx', 'word/footer2.xml')
       rels_xml = extract_docx_file('.default.docx', 'word/_rels/document.xml.rels')
-      assert_match(/w:ascii="Garamond"/, styles_xml)
+      assert_match(/w:ascii="EB Garamond"/, styles_xml)
+      assert_match(/w:style[^>]*w:styleId="Normal".*?<w:widowControl\s*\/>/m, styles_xml)
       assert_match(/w:color w:val="000000"/, styles_xml)
-      assert_match(/w:style w:type="paragraph" w:default="1" w:styleId="Normal".*?<w:jc w:val="left"\/>.*?<w:ind w:firstLine="288"\/>.*?w:line="240".*?w:sz w:val="22"/m, styles_xml)
-      assert_match(/w:style w:type="paragraph" w:styleId="BodyText".*?<w:ind w:firstLine="288"\/>.*?w:sz w:val="22"/m, styles_xml)
-      assert_match(/w:style w:type="paragraph" w:styleId="FirstParagraph".*?w:firstLine="0".*?w:sz w:val="22"/m, styles_xml)
+      assert_match(/w:style w:type="paragraph" w:default="1" w:styleId="Normal".*?<w:jc w:val="left"\/>.*?<w:ind w:firstLine="288"\/>.*?w:line="240".*?w:sz w:val="24"/m, styles_xml)
+      assert_match(/w:style w:type="paragraph" w:styleId="BodyText".*?<w:ind w:firstLine="288"\/>.*?w:sz w:val="24"/m, styles_xml)
+      assert_match(/w:style w:type="paragraph" w:styleId="FirstParagraph".*?w:firstLine="0".*?w:sz w:val="24"/m, styles_xml)
       assert_match(/w:style w:type="paragraph" w:styleId="Compact".*?w:firstLine="0".*?w:after="0"/m, styles_xml)
       assert_match(/w:style w:type="paragraph" w:styleId="Heading1".*?<w:b\/>.*?w:sz w:val="80"/m, styles_xml)
       assert_match(/w:style w:type="paragraph" w:styleId="Heading2".*?<w:b\/>.*?w:sz w:val="30"/m, styles_xml)
